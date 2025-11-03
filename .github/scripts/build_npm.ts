@@ -45,7 +45,7 @@ await build({
     sideEffects: false,
   },
   compilerOptions: {
-    lib: ["ESNext"],
+    lib: ["ESNext", "DOM"],
     target: "Latest",
   },
 });
