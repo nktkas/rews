@@ -1,0 +1,10 @@
+{
+  "name": "@nktkas/rews",
+  "version": "0.1.0",
+  "exports": "./mod.ts",
+  "fmt": {
+    "lineWidth": 120
+  },
+  "license": "MIT",
+  "lock": false
+}
