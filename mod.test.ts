@@ -756,6 +756,41 @@ Deno.test("ReconnectingWebSocket", async (t) => {
 
         rws.close();
       });
+
+      await t.step("Directly pass a message to the socket if the instance is terminated", () => {
+        const rws = new ReconnectingWebSocket("ws://localhost:8080");
+        rws.close(); // Permanently terminate
+
+        let called = false;
+        // @ts-ignore - access private property
+        const originalSend = rws._socket.send;
+        // @ts-ignore - access private property
+        rws._socket.send = function (data) {
+          called = true;
+          originalSend.call(this, data);
+        };
+
+        rws.send("DirectMessage");
+
+        assert(called, "Socket send() should be called directly when terminated");
+        // @ts-ignore - accessing private property
+        assertEquals(rws._messageBuffer.length, 0);
+      });
+
+      await t.step("Directly attach a listener to the socket if the instance is terminated", () => {
+        const rws = new ReconnectingWebSocket("ws://localhost:8080");
+        rws.close(); // Permanently terminate
+
+        let called = false;
+        const listener = () => called = true;
+        rws.addEventListener("message", listener);
+
+        // @ts-ignore - accessing private property
+        assertEquals(rws._listeners.length, 0, "Listener should not be wrapped when terminated");
+
+        rws.dispatchEvent(new Event("message"));
+        assert(called, "Listener should be called directly");
+      });
     });
   });
 
