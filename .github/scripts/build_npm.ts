@@ -17,8 +17,7 @@ await build({
   package: {
     name: "@nktkas/rews",
     version: denoJson.version,
-    description:
-      "Drop-in WebSocket replacement that reconnects automatically and preserves all event listeners and buffered messages.",
+    description: "WebSocket with auto-reconnection — a drop-in replacement for the standard WebSocket.",
     keywords: [
       "websocket",
       "ws",

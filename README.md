@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/@nktkas/rews)](https://www.npmjs.com/package/@nktkas/rews)
 [![JSR](https://jsr.io/badges/@nktkas/rews)](https://jsr.io/@nktkas/rews)
 
-Drop-in WebSocket replacement that reconnects automatically and preserves all event listeners and buffered messages.
+WebSocket with auto-reconnection — a drop-in replacement for the standard WebSocket.
 
 ## Installation
 
@@ -26,7 +26,7 @@ deno add jsr:@nktkas/rews
 
 ## Usage
 
-Replace `WebSocket` with `ReconnectingWebSocket`:
+Simply replace `WebSocket` with `ReconnectingWebSocket`:
 
 ```ts
 import { ReconnectingWebSocket } from "@nktkas/rews";
@@ -36,7 +36,7 @@ const ws = new ReconnectingWebSocket("wss://...", {
   // optional reconnection options
 });
 ws.addEventListener("message", (e) => console.log(e.data));
-ws.send("hello");
+ws.send("data");
 ```
 
 ### Options
@@ -69,7 +69,7 @@ interface ReconnectingWebSocketOptions {
 }
 ```
 
-### Differences from standard WebSocket:
+### Differences from standard WebSocket
 
 #### Automatic Reconnection
 
@@ -98,17 +98,84 @@ const ws = new ReconnectingWebSocket(
 
 #### Terminate Event
 
-Dispatched on permanent closure (reconnection limit, user termination, or unknown error during reconnection):
+The `terminate` event fires when the WebSocket permanently closes.
+
+Error Codes:
+
+- `RECONNECTION_LIMIT` - Maximum reconnection attempts exceeded
+- `TERMINATED_BY_USER` - Closed via `close()` method
+- `UNKNOWN_ERROR` - Unexpected failure during reconnection
+
+Usage:
 
 ```ts
-import { ReconnectingWebSocket } from "@nktkas/rews";
-
-const ws = new ReconnectingWebSocket("wss://...");
-
 ws.addEventListener("terminate", (event) => {
   const error = event.detail; // ReconnectingWebSocketError
-  console.log(error.code, error.cause);
-  // code: "RECONNECTION_LIMIT" | "TERMINATED_BY_USER" | "UNKNOWN_ERROR"
-  // cause: original `Error` if available
+  console.log(error.code); // Error code
+  console.log(error.cause); // Original error if available
 });
+
+// Check termination status manually
+if (ws.isTerminated) {
+  // Connection is permanently closed
+}
+```
+
+## Why Use This
+
+**Before:**
+
+```ts
+// Requires manual reconnection logic, listener re-attachment, and message buffering
+let ws: WebSocket;
+let attempts = 0;
+const messageHandler = (e) => console.log(e.data);
+const messageQueue: string[] = [];
+
+function connect() {
+  ws = new WebSocket("wss://example.com");
+
+  // Re-attach listener on each reconnection
+  ws.addEventListener("message", messageHandler);
+
+  ws.onopen = () => {
+    attempts = 0;
+
+    // Send queued messages
+    while (messageQueue.length > 0) {
+      ws.send(messageQueue.shift()!);
+    }
+  };
+
+  ws.onclose = () => {
+    // Attempt reconnection
+    if (attempts++ < 3) {
+      setTimeout(connect, 1000);
+    }
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+function send(data: string) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(data);
+  } else {
+    messageQueue.push(data); // Buffer message if not connected
+  }
+}
+
+connect();
+send("data");
+```
+
+**After:**
+
+```ts
+// Original WebSocket API remains unchanged despite reconnection logic
+const ws = new ReconnectingWebSocket("wss://example.com");
+ws.addEventListener("message", (e) => console.log(e.data)); // listener persists across reconnections
+ws.send("data"); // buffered if disconnected
 ```
