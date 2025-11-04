@@ -102,9 +102,9 @@ The `terminate` event fires when the WebSocket permanently closes.
 
 Error Codes:
 
-- `RECONNECTION_LIMIT` - Maximum reconnection attempts exceeded
+- `RECONNECTION_LIMIT` - Maximum reconnection attempts reached
 - `TERMINATED_BY_USER` - Closed via `close()` method
-- `UNKNOWN_ERROR` - Unexpected failure during reconnection
+- `UNKNOWN_ERROR` - An unknown error occurred during reconnection
 
 Usage:
 

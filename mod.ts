@@ -2,9 +2,15 @@
 
 type UrlProvider = string | URL | (() => string | URL);
 type ProtocolsProvider = string | string[] | undefined | (() => string | string[] | undefined);
+
 type WebSocketSendData = string | ArrayBufferLike | Blob | ArrayBufferView;
 
-/** Configuration options for the `ReconnectingWebSocket`. */
+type ReconnectingWebSocketErrorCode =
+  | "RECONNECTION_LIMIT"
+  | "TERMINATED_BY_USER"
+  | "UNKNOWN_ERROR";
+
+/** Configuration options for the {@link ReconnectingWebSocket}. */
 export interface ReconnectingWebSocketOptions {
   /**
    * Custom WebSocket constructor.
@@ -35,29 +41,41 @@ interface ReconnectingWebSocketEventMap extends WebSocketEventMap {
   terminate: CustomEvent<ReconnectingWebSocketError>;
 }
 
-/** Error thrown when reconnection problems occur. */
+/** Error thrown when reconnection fails in {@link ReconnectingWebSocket}. */
 export class ReconnectingWebSocketError extends Error {
-  constructor(
-    public code:
-      | "RECONNECTION_LIMIT"
-      | "TERMINATED_BY_USER"
-      | "UNKNOWN_ERROR",
-    cause?: unknown,
-  ) {
+  /**
+   * Error code indicating the type of reconnection error:
+   * - `RECONNECTION_LIMIT`: Maximum reconnection attempts reached
+   * - `TERMINATED_BY_USER`: Closed via `close()` method
+   * - `UNKNOWN_ERROR`: Unexpected failure during reconnection
+   */
+  code: ReconnectingWebSocketErrorCode;
+  constructor(code: ReconnectingWebSocketErrorCode, cause?: unknown) {
     super(`Error when reconnecting WebSocket: ${code}`);
     this.name = "ReconnectingWebSocketError";
     this.cause = cause;
+    this.code = code;
   }
 }
 
 /**
- * A WebSocket that automatically reconnects and restores event listeners after disconnection.
- * Fully compatible with standard WebSocket API.
+ * A WebSocket with auto-reconnection logic. Fully compatible with standard WebSocket API.
+ *
+ * Features:
+ * - Automatic reconnection with configurable max retries and delay.
+ * - Buffers messages sent while disconnected and sends them upon reconnection.
+ * - Re-applies event listeners after reconnection.
+ * - Supports dynamic URL and protocols via functions.
+ *
+ * Additional properties and events:
+ * - `isTerminated`: Indicates whether the instance has been permanently terminated.
+ * - `terminationReason`: If terminated, provides the reason for termination.
+ * - `terminate` event: Fired when the instance is permanently terminated.
  */
 export class ReconnectingWebSocket implements WebSocket {
   protected _socket!: WebSocket;
-  protected _url: UrlProvider;
-  protected _protocols: ProtocolsProvider;
+  protected _urlProvider: UrlProvider;
+  protected _protocolsProvider: ProtocolsProvider;
   protected _listeners: {
     type: string;
     listener: EventListenerOrEventListenerObject;
@@ -68,10 +86,17 @@ export class ReconnectingWebSocket implements WebSocket {
   protected _messageBuffer: WebSocketSendData[] = [];
   protected _abortController: AbortController = new AbortController();
 
+  /** Indicates whether the instance has been permanently terminated. */
   get isTerminated(): boolean {
     return this._abortController.signal.aborted;
   }
 
+  /** If terminated, provides the reason for termination. */
+  get terminationReason(): ReconnectingWebSocketError | undefined {
+    return this._abortController.signal.reason;
+  }
+
+  /** Reconnection configuration options. */
   reconnectOptions: Required<ReconnectingWebSocketOptions>;
 
   constructor(url: UrlProvider, options?: ReconnectingWebSocketOptions);
@@ -96,8 +121,8 @@ export class ReconnectingWebSocket implements WebSocket {
       );
     }
 
-    this._url = url;
-    this._protocols = protocols;
+    this._urlProvider = url;
+    this._protocolsProvider = protocols;
     this.reconnectOptions = {
       WebSocket: options?.WebSocket ?? WebSocket,
       maxRetries: options?.maxRetries ?? 3,
@@ -110,8 +135,10 @@ export class ReconnectingWebSocket implements WebSocket {
   }
 
   protected _createSocket() {
-    const url = typeof this._url === "function" ? this._url() : this._url;
-    const protocols = typeof this._protocols === "function" ? this._protocols() : this._protocols;
+    const url = typeof this._urlProvider === "function" ? this._urlProvider() : this._urlProvider;
+    const protocols = typeof this._protocolsProvider === "function"
+      ? this._protocolsProvider()
+      : this._protocolsProvider;
     this._socket = createSocketWithTimeout(
       () => new this.reconnectOptions.WebSocket(url, protocols),
       this.reconnectOptions.connectionTimeout,
