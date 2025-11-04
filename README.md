@@ -117,7 +117,9 @@ ws.addEventListener("terminate", (event) => {
 
 // Check termination status manually
 if (ws.isTerminated) {
-  // Connection is permanently closed
+  const error = ws.terminationReason!; // ReconnectingWebSocketError
+  console.log(error.code); // Error code
+  console.log(error.cause); // Original error if available
 }
 ```
 
