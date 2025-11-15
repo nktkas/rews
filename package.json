@@ -1,0 +1,47 @@
+{
+  "name": "@nktkas/rews",
+  "version": "1.1.0",
+  "description": "WebSocket with auto-reconnection — a drop-in replacement for the standard WebSocket.",
+  "keywords": [
+    "websocket",
+    "ws",
+    "reconnecting",
+    "reconnection",
+    "reconnect",
+    "retrying",
+    "automatic"
+  ],
+  "homepage": "https://github.com/nktkas/rews",
+  "bugs": {
+    "url": "https://github.com/nktkas/rews/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nktkas/rews.git"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "nktkas",
+    "email": "github.turk9@passmail.net",
+    "url": "https://github.com/nktkas"
+  },
+  "sideEffects": false,
+  "type": "module",
+  "exports": "./mod.js",
+  "scripts": {
+    "dev:build": "npx tsc",
+    "dev:fmt": "npx deno fmt && npx sort-package-json",
+    "dev:lint": "npx deno lint",
+    "dev:typecheck": "npx deno check --doc",
+    "test": "npx deno test -A && node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "ws": "^8.18.3"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
