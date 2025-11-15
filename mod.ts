@@ -96,6 +96,11 @@ export class ReconnectingWebSocket implements WebSocket {
     return this._abortController.signal.reason;
   }
 
+  /** AbortSignal that is aborted when the instance is permanently terminated. */
+  get terminationSignal(): AbortSignal {
+    return this._abortController.signal;
+  }
+
   /** Reconnection configuration options. */
   reconnectOptions: Required<ReconnectingWebSocketOptions>;
 
