@@ -4,6 +4,12 @@ import http from "node:http";
 import { WebSocketServer } from "ws";
 import { ReconnectingWebSocket, ReconnectingWebSocketError } from "./mod.ts";
 
+type ReconnectingWebSocketWithInternals = ReconnectingWebSocket & {
+  _listeners: ReconnectingWebSocket["_listeners"];
+  _messageBuffer: ReconnectingWebSocket["_messageBuffer"];
+  _socket: ReconnectingWebSocket["_socket"];
+};
+
 const server = http.createServer();
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", async (request, socket, head) => {
@@ -251,11 +257,10 @@ test("ReconnectingWebSocket", async (t) => {
       });
 
       await t.test("Does not wrap listener when termination signal is aborted", () => {
-        const rws = new ReconnectingWebSocket("ws://localhost:8080/");
+        const rws = new ReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
         rws.close();
 
         rws.addEventListener("message", () => {});
-        // @ts-ignore - accessing private property
         const listenersCount = rws._listeners.length;
         assert.strictEqual(listenersCount, 0);
       });
@@ -289,7 +294,7 @@ test("ReconnectingWebSocket", async (t) => {
       });
 
       await t.test("Removes original listener when wrapped listener not found", () => {
-        const rws = new ReconnectingWebSocket("ws://localhost:8080/");
+        const rws = new ReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
 
         // First, terminate the connection to prevent wrapping
         rws.close();
@@ -300,7 +305,6 @@ test("ReconnectingWebSocket", async (t) => {
 
         rws.addEventListener("message", listener);
 
-        // @ts-ignore - accessing private property
         const listenersCount = rws._listeners.length;
         assert.strictEqual(listenersCount, 0, "No wrapped listeners should be stored");
 
@@ -526,7 +530,7 @@ test("ReconnectingWebSocket", async (t) => {
         const rws = new ReconnectingWebSocket("ws://localhost:8080/", {
           maxRetries: 1,
           reconnectionDelay: 0,
-        });
+        }) as ReconnectingWebSocketWithInternals;
 
         await new Promise((resolve) => rws.addEventListener("open", resolve)); // Wait for the connection to open
 
@@ -534,7 +538,6 @@ test("ReconnectingWebSocket", async (t) => {
         rws.send("HelloAfterClose1");
         rws.send("HelloAfterClose2");
 
-        // @ts-ignore - accessing private property
         assert.strictEqual(rws._messageBuffer.length, 2);
 
         const receivedMessages: string[] = [];
@@ -546,7 +549,6 @@ test("ReconnectingWebSocket", async (t) => {
         assert(receivedMessages.includes("HelloAfterClose1"));
         assert(receivedMessages.includes("HelloAfterClose2"));
 
-        // @ts-ignore - accessing private property
         assert.strictEqual(rws._messageBuffer.length, 0);
 
         rws.close();
@@ -642,23 +644,19 @@ test("ReconnectingWebSocket", async (t) => {
       });
 
       await t.test("Adding identical listeners does not increase eventListeners array", () => {
-        const rws = new ReconnectingWebSocket("ws://localhost:8080/");
+        const rws = new ReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
         const handler = () => {};
 
-        // @ts-ignore - internal property
         assert.strictEqual(rws._listeners.length, 0, "Initially no event listeners stored");
 
         rws.addEventListener("message", handler);
         rws.addEventListener("message", handler);
         rws.addEventListener("message", handler);
 
-        // @ts-ignore - internal property
         assert.strictEqual(rws._listeners.length, 1, "should still only have 1 event listener after duplicates");
 
-        // Remove it once, array should be empty
         rws.removeEventListener("message", handler);
 
-        // @ts-ignore - internal property
         assert.strictEqual(rws._listeners.length, 0, "should have no listeners after removal");
 
         rws.close();
@@ -759,13 +757,11 @@ test("ReconnectingWebSocket", async (t) => {
       });
 
       await t.test("Directly pass a message to the socket if the instance is terminated", () => {
-        const rws = new ReconnectingWebSocket("ws://localhost:8080/");
+        const rws = new ReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
         rws.close(); // Permanently terminate
 
         let called = false;
-        // @ts-ignore - access private property
         const originalSend = rws._socket.send;
-        // @ts-ignore - access private property
         rws._socket.send = function (data) {
           called = true;
           originalSend.call(this, data);
@@ -774,19 +770,17 @@ test("ReconnectingWebSocket", async (t) => {
         rws.send("DirectMessage");
 
         assert(called, "Socket send() should be called directly when terminated");
-        // @ts-ignore - accessing private property
         assert.strictEqual(rws._messageBuffer.length, 0);
       });
 
       await t.test("Directly attach a listener to the socket if the instance is terminated", () => {
-        const rws = new ReconnectingWebSocket("ws://localhost:8080/");
+        const rws = new ReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
         rws.close(); // Permanently terminate
 
         let called = false;
         const listener = () => called = true;
         rws.addEventListener("message", listener);
 
-        // @ts-ignore - accessing private property
         assert.strictEqual(rws._listeners.length, 0, "Listener should not be wrapped when terminated");
 
         rws.dispatchEvent(new Event("message"));
