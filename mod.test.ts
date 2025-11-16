@@ -332,6 +332,29 @@ test("ReconnectingWebSocket", async (t) => {
 
       rws.close();
     });
+
+    await t.test("use custom WebSocket implementation", () => {
+      class CustomWebSocket extends WebSocket {}
+      const rws = new ReconnectingWebSocket("ws://localhost:8080/", undefined, {
+        WebSocket: CustomWebSocket,
+      }) as ReconnectingWebSocketWithInternals;
+      assert(rws._socket instanceof CustomWebSocket);
+    });
+
+    await t.test("throws when no WebSocket implementation is available", () => {
+      const originalWebSocket = globalThis.WebSocket;
+      // @ts-expect-error - intentionally removing the global constructor for the test
+      globalThis.WebSocket = undefined;
+
+      try {
+        assert.throws(
+          () => new ReconnectingWebSocket("ws://localhost:8080/"),
+          "No WebSocket implementation found",
+        );
+      } finally {
+        globalThis.WebSocket = originalWebSocket;
+      }
+    });
   });
 
   await t.test("Reconnecting WebSocket", async (t) => {
@@ -522,6 +545,23 @@ test("ReconnectingWebSocket", async (t) => {
             `Close event #${i} waited less than the function-supplied delay. Expected at least ${expected}ms, got ${diff}ms`,
           );
         }
+      });
+
+      await t.test("Errors thrown by reconnectionDelay terminate the socket", async () => {
+        const delayError = new Error("boom");
+        const rws = new ReconnectingWebSocket("ws://invalid4567t7281.com", {
+          maxRetries: 1,
+          reconnectionDelay: () => {
+            throw delayError;
+          },
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+
+        assert(rws.isTerminated);
+        assert(rws.terminationReason instanceof ReconnectingWebSocketError);
+        assert(rws.terminationReason.code === "UNKNOWN_ERROR");
+        assert.strictEqual(rws.terminationSignal.reason.cause, delayError);
       });
     });
 
