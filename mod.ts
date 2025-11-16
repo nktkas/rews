@@ -70,6 +70,7 @@ export class ReconnectingWebSocketError extends Error {
  * Additional properties and events:
  * - `isTerminated`: Indicates whether the instance has been permanently terminated.
  * - `terminationReason`: If terminated, provides the reason for termination.
+ * - `terminationSignal`: AbortSignal that is aborted when the instance is permanently terminated.
  * - `terminate` event: Fired when the instance is permanently terminated.
  */
 export class ReconnectingWebSocket implements WebSocket {
