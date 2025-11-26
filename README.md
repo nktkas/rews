@@ -1,8 +1,8 @@
 # @nktkas/rews
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
 [![npm](https://img.shields.io/npm/v/@nktkas/rews)](https://www.npmjs.com/package/@nktkas/rews)
 [![JSR](https://jsr.io/badges/@nktkas/rews)](https://jsr.io/@nktkas/rews)
+[![bundlejs](https://img.shields.io/bundlejs/size/@nktkas/rews)](https://bundlejs.com/?q=@nktkas/rews)
 
 WebSocket with auto-reconnection — a drop-in replacement for the standard WebSocket.
 
