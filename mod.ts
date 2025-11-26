@@ -324,7 +324,7 @@ export class ReconnectingWebSocket implements WebSocket {
       const index = this._listeners.findIndex((e) => listenersMatch(e, { type, listener, options }));
       if (index !== -1) {
         // Use the existing listener proxy
-        listenerProxy = this._listeners[index].listenerProxy;
+        listenerProxy = this._listeners[index]!.listenerProxy;
       } else {
         // Wrap the original listener to follow the once option when reconnecting
         listenerProxy = (event: Event) => {
@@ -367,7 +367,7 @@ export class ReconnectingWebSocket implements WebSocket {
     // Remove a wrapped listener, not an original listener
     const index = this._listeners.findIndex((e) => listenersMatch(e, { type, listener, options }));
     if (index !== -1) {
-      const { listenerProxy } = this._listeners[index];
+      const { listenerProxy } = this._listeners[index]!;
       this._socket.removeEventListener(type, listenerProxy, options);
       this._listeners.splice(index, 1);
     } else {

@@ -496,7 +496,7 @@ Deno.test("ReconnectingWebSocket", async (t) => {
         rws.close();
 
         for (let i = 1; i < closeTimes.length; i++) {
-          const diff = closeTimes[i] - closeTimes[i - 1];
+          const diff = closeTimes[i]! - closeTimes[i - 1]!;
           assertGreaterOrEqual(
             diff,
             customDelay,
@@ -509,7 +509,7 @@ Deno.test("ReconnectingWebSocket", async (t) => {
         const delays = [200, 500, 700];
         using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
           maxRetries: delays.length,
-          reconnectionDelay: (attempt) => delays[attempt] || delays[delays.length - 1],
+          reconnectionDelay: (attempt) => delays[attempt] || delays[delays.length - 1]!,
         });
 
         const closeTimes: number[] = [];
@@ -519,7 +519,7 @@ Deno.test("ReconnectingWebSocket", async (t) => {
         rws.close();
 
         for (let i = 1; i < closeTimes.length; i++) {
-          const diff = closeTimes[i] - closeTimes[i - 1];
+          const diff = closeTimes[i]! - closeTimes[i - 1]!;
           const expected = delays[i - 1] || delays[delays.length - 1];
           assertGreaterOrEqual(
             diff,
