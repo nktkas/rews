@@ -381,6 +381,17 @@ export class ReconnectingWebSocket implements WebSocket {
   }
 }
 
+const AbortSignal_ = /* @__PURE__ */ (() => { // Polyfill
+  return {
+    /** @see https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static */
+    timeout: AbortSignal?.timeout ? (ms: number) => AbortSignal.timeout(ms) : (ms: number) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("Signal timed out.", "TimeoutError")), ms);
+      return controller.signal;
+    },
+  };
+})();
+
 function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number | null): WebSocket {
   const socket = socketFactory();
   if (timeout === null) return socket;
@@ -404,7 +415,7 @@ function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number
     socket.close(3008, "Timeout"); // https://www.iana.org/assignments/websocket/websocket.xml#close-code-number
   };
 
-  const signal = AbortSignal.timeout(timeout);
+  const signal = AbortSignal_.timeout(timeout);
 
   socket.addEventListener("open", handleOpen, { once: true, signal });
   socket.addEventListener("close", handleClose, { once: true, signal });
