@@ -381,12 +381,22 @@ export class ReconnectingWebSocket implements WebSocket {
   }
 }
 
+/** @see https://developer.mozilla.org/en-US/docs/Web/API/DOMException */
+const DOMException_ = /* @__PURE__ */ (() => {
+  return globalThis.DOMException || class DOMExceptionPolyfill extends Error {
+    constructor(message = "", name = "Error") {
+      super(message);
+      this.name = name;
+    }
+  };
+})();
+
 const AbortSignal_ = /* @__PURE__ */ (() => { // Polyfill
   return {
     /** @see https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static */
     timeout: AbortSignal?.timeout ? (ms: number) => AbortSignal.timeout(ms) : (ms: number) => {
       const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException("Signal timed out.", "TimeoutError")), ms);
+      setTimeout(() => controller.abort(new DOMException_("Signal timed out.", "TimeoutError")), ms);
       return controller.signal;
     },
   };
