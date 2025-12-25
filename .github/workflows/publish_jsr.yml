@@ -1,5 +1,7 @@
 name: Publish Package to JSR
 on:
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -11,7 +13,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Publish package
         run: npx jsr publish
