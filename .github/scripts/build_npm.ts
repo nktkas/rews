@@ -1,7 +1,10 @@
 // deno-lint-ignore-file no-import-prefix
+
 /**
- * Builds the Deno library for working with NodeJS or publishing to npm
- * Command: deno run -A .github/scripts/build_npm.ts
+ * Build the Deno library for working with NodeJS or publishing to npm.
+ *
+ * Run:
+ * - Deno: `deno run -A .github/scripts/build_npm.ts`
  */
 
 import { build, emptyDir } from "jsr:@deno/dnt@^0.42.1";
@@ -17,16 +20,8 @@ await build({
   package: {
     name: "@nktkas/rews",
     version: denoJson.version,
-    description: "WebSocket with auto-reconnection — a drop-in replacement for the standard WebSocket.",
-    keywords: [
-      "websocket",
-      "ws",
-      "reconnecting",
-      "reconnection",
-      "reconnect",
-      "retrying",
-      "automatic",
-    ],
+    description: "Drop-in WebSocket replacement with automatic reconnection.",
+    keywords: ["websocket", "ws", "reconnect", "retry"],
     homepage: "https://github.com/nktkas/rews",
     bugs: {
       url: "https://github.com/nktkas/rews/issues",
@@ -51,9 +46,8 @@ await build({
     target: "Latest",
     sourceMap: true,
   },
+  postBuild: async () => {
+    await Deno.copyFile("LICENSE", "build/npm/LICENSE");
+    await Deno.copyFile("README.md", "build/npm/README.md");
+  },
 });
-await Promise.all([
-  // Copy additional files to npm build directory
-  Deno.copyFile("LICENSE", "build/npm/LICENSE"),
-  Deno.copyFile("README.md", "build/npm/README.md"),
-]);

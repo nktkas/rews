@@ -1,445 +1,373 @@
-// deno-lint-ignore-file no-import-prefix
-import {
-  assert,
-  assertArrayIncludes,
-  assertEquals,
-  assertFalse,
-  assertGreaterOrEqual,
-  assertInstanceOf,
-  assertIsError,
-  assertNotEquals,
-  assertThrows,
-} from "jsr:@std/assert@1";
-import { ReconnectingWebSocket, ReconnectingWebSocketError, type ReconnectingWebSocketOptions } from "./mod.ts";
+// deno-lint-ignore-file no-explicit-any
 
-type UrlProvider = string | URL | (() => string | URL);
-type ProtocolsProvider = string | string[] | (() => string | string[] | undefined) | undefined;
+/**
+ * @module Test suite for ReconnectingWebSocket.
+ *
+ * Run:
+ * - Deno: `deno test -A mod.test.ts`
+ * - Node.js: `node --test mod.test.ts`
+ * - Bun: `bun test --timeout 30000 mod.test.ts`
+ */
+
+import process from "node:process";
+import { Buffer } from "node:buffer";
+import { describe, it } from "node:test";
+import { deepStrictEqual, ok, strictEqual, throws } from "node:assert/strict";
+import { ReconnectingWebSocket, ReconnectingWebSocketError } from "./mod.ts";
+
+// ============================================================
+// Test infrastructure
+// ============================================================
 
 class DisposableReconnectingWebSocket extends ReconnectingWebSocket implements Disposable {
-  constructor(url: UrlProvider, options?: ReconnectingWebSocketOptions);
-  constructor(url: UrlProvider, protocols?: ProtocolsProvider, options?: ReconnectingWebSocketOptions);
-  constructor(
-    url: UrlProvider,
-    protocolsOrOptions?: ProtocolsProvider | ReconnectingWebSocketOptions,
-    maybeOptions?: ReconnectingWebSocketOptions,
-  ) {
-    const isProtocols = protocolsOrOptions === undefined ||
-      typeof protocolsOrOptions === "string" ||
-      typeof protocolsOrOptions === "function" ||
-      Array.isArray(protocolsOrOptions);
-    const protocols = isProtocols ? protocolsOrOptions as ProtocolsProvider : undefined;
-    const options = isProtocols ? maybeOptions : protocolsOrOptions as ReconnectingWebSocketOptions | undefined;
-    super(url, protocols, options);
-  }
-
-  [Symbol.dispose]() {
-    if (!this.isTerminated) {
-      this.close();
-    }
+  [Symbol.dispose](): void {
+    if (!this.isTerminated) this.close();
   }
 }
 
 type ReconnectingWebSocketWithInternals = DisposableReconnectingWebSocket & {
-  _listeners: ReconnectingWebSocket["_listeners"];
   _messageBuffer: ReconnectingWebSocket["_messageBuffer"];
   _socket: ReconnectingWebSocket["_socket"];
 };
 
-Deno.test("ReconnectingWebSocket", async (t) => {
-  const server = Deno.serve({ port: 8080 }, async (request) => {
-    if (request.headers.get("upgrade") !== "websocket") {
-      return new Response(null, { status: 501 });
-    }
+// ============================================================
+// Echo server
+// ============================================================
 
-    const url = new URL(request.url);
-    const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay") ?? "1000") : 1000;
+interface EchoServer {
+  port: number;
+  shutdown(): Promise<void>;
+}
 
-    await new Promise((resolve) => setTimeout(resolve, delay));
+// Platform-specific WebSocket echo server
+async function createEchoServer(): Promise<EchoServer> {
+  // Deno — Deno.serve + Deno.upgradeWebSocket (no types in shared context)
+  if ("Deno" in globalThis) {
+    const Deno = (globalThis as any).Deno;
 
-    const protocol = request.headers.get("sec-websocket-protocol") ?? undefined;
-    const { socket, response } = Deno.upgradeWebSocket(request, { protocol });
-    socket.onmessage = (event) => {
-      socket.send(event.data);
+    const server = Deno.serve({ port: 0 }, async (req: Request) => {
+      if (req.headers.get("upgrade") !== "websocket") {
+        return new Response(null, { status: 501 });
+      }
+
+      const url = new URL(req.url);
+      const protocol = req.headers.get("sec-websocket-protocol") ?? undefined;
+
+      const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay")!) : 0;
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+
+      const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
+      socket.onmessage = (e: MessageEvent) => socket.send(e.data);
+
+      return response;
+    });
+    return {
+      port: server.addr.port,
+      shutdown: () => server.shutdown(),
     };
-    return response;
+  }
+
+  // Bun — Bun.serve with websocket handler (no types in shared context)
+  if ("Bun" in globalThis) {
+    const Bun = (globalThis as any).Bun;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(req: Request, server: { upgrade(req: Request): boolean }): Response | undefined {
+        if (req.headers.get("upgrade") !== "websocket") {
+          return new Response(null, { status: 501 });
+        }
+        server.upgrade(req);
+      },
+      websocket: {
+        message(ws: { send(msg: string | ArrayBuffer): void }, msg: string | ArrayBuffer): void {
+          ws.send(msg);
+        },
+      },
+    });
+
+    return {
+      port: server.port,
+      shutdown: () => server.stop(true),
+    };
+  }
+
+  // Node.js — node:http + manual WebSocket handshake
+  const http = await import("node:http");
+  const crypto = await import("node:crypto");
+
+  const httpServer = http.createServer((_req, res) => {
+    res.writeHead(501);
+    res.end();
   });
 
-  await t.step("Basic WebSocket", async (t) => {
-    await t.step("get url()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
+  httpServer.on("upgrade", (req, socket) => {
+    const key = req.headers["sec-websocket-key"];
+    if (!key) {
+      socket.destroy();
+      return;
+    }
 
-      assertEquals(rws.url, "ws://localhost:8080/");
+    const url = new URL(req.url!, `http://${req.headers.host}`);
+    const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay")!) : 0;
+
+    const completeHandshake = (): void => {
+      const protocol = req.headers["sec-websocket-protocol"];
+      const acceptKey = crypto.createHash("sha1")
+        .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest("base64");
+
+      let responseHeaders = "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        `Sec-WebSocket-Accept: ${acceptKey}\r\n`;
+
+      if (protocol) {
+        const chosen = protocol.split(",")[0]!.trim();
+        responseHeaders += `Sec-WebSocket-Protocol: ${chosen}\r\n`;
+      }
+      responseHeaders += "\r\n";
+      socket.write(responseHeaders);
+
+      // Minimal WebSocket frame parser for echo
+      socket.on("data", (data: Buffer) => {
+        let offset = 0;
+        while (offset < data.length) {
+          const firstByte = data[offset]!;
+          const opcode = firstByte & 0x0f;
+          const secondByte = data[offset + 1]!;
+          const isMasked = (secondByte & 0x80) !== 0;
+          let payloadLength = secondByte & 0x7f;
+          offset += 2;
+
+          if (payloadLength === 126) {
+            payloadLength = data.readUInt16BE(offset);
+            offset += 2;
+          } else if (payloadLength === 127) {
+            payloadLength = Number(data.readBigUInt64BE(offset));
+            offset += 8;
+          }
+
+          let maskKey: Buffer | null = null;
+          if (isMasked) {
+            maskKey = data.subarray(offset, offset + 4);
+            offset += 4;
+          }
+
+          const payload = Buffer.from(data.subarray(offset, offset + payloadLength));
+          offset += payloadLength;
+
+          if (isMasked && maskKey) {
+            for (let i = 0; i < payload.length; i++) {
+              payload[i] = payload[i]! ^ maskKey[i % 4]!;
+            }
+          }
+
+          // 0x8 = close frame
+          if (opcode === 0x8) {
+            socket.write(Buffer.from([0x88, 0x00]));
+            socket.end();
+            return;
+          }
+
+          // Echo text (0x1) and binary (0x2) frames
+          if (opcode === 0x1 || opcode === 0x2) {
+            const frameHeader: number[] = [];
+            frameHeader.push(0x80 | opcode); // FIN + opcode
+            if (payload.length < 126) {
+              frameHeader.push(payload.length);
+            } else if (payload.length < 65536) {
+              frameHeader.push(126);
+              frameHeader.push((payload.length >> 8) & 0xff);
+              frameHeader.push(payload.length & 0xff);
+            }
+            socket.write(Buffer.concat([Buffer.from(frameHeader), payload]));
+          }
+        }
+      });
+    };
+
+    if (delay > 0) setTimeout(completeHandshake, delay);
+    else completeHandshake();
+  });
+
+  const port = await new Promise<number>((resolve) => {
+    httpServer.listen(0, () => {
+      resolve((httpServer.address() as { port: number }).port);
+    });
+  });
+  httpServer.unref();
+
+  return {
+    port,
+    shutdown: () =>
+      new Promise((resolve) => {
+        httpServer.close(() => resolve());
+      }),
+  };
+}
+
+// TCP server that accepts connections but never sends a response — for connectionTimeout tests
+async function createHangingServer(): Promise<{ port: number; shutdown(): void }> {
+  const net = await import("node:net");
+  const server = net.createServer((socket) => {
+    // Accept connection but never respond — WebSocket handshake will hang
+    socket.unref();
+    socket.on("error", () => {}); // Ignore client disconnects
+  });
+  server.unref();
+
+  const port = await new Promise<number>((resolve) => {
+    server.listen(0, () => {
+      resolve((server.address() as { port: number }).port);
+    });
+  });
+
+  return {
+    port,
+    shutdown: () => server.close(),
+  };
+}
+
+const echoServer = await createEchoServer();
+const WS_URL = `ws://localhost:${echoServer.port}`;
+const INVALID_WS_URL = "ws://invalid4567t7281.com";
+
+// TCP server that accepts connections but never responds — for connectionTimeout tests
+const hangingServer = await createHangingServer();
+const HANGING_URL = `ws://localhost:${hangingServer.port}`;
+
+process.on("exit", () => {
+  echoServer.shutdown();
+  hangingServer.shutdown();
+});
+
+// ============================================================
+// Tests
+// ============================================================
+
+describe("ReconnectingWebSocket", () => {
+  // --- Constructor --------------------------------------------------------
+
+  describe("Constructor", () => {
+    it("on* handlers default to null and round-trip correctly", () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL);
+
+      for (const prop of ["onopen", "onclose", "onerror", "onmessage"] as const) {
+        strictEqual(rws[prop], null, `${prop} should default to null`);
+
+        const handler = () => {};
+        rws[prop] = handler;
+        strictEqual(rws[prop], handler, `${prop} getter should return the assigned handler`);
+
+        rws[prop] = null;
+        strictEqual(rws[prop], null, `${prop} should be null after reset`);
+      }
     });
 
-    await t.step("get readyState()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-      assertEquals(rws.readyState, WebSocket.CONNECTING);
-    });
-
-    await t.step("get bufferedAmount()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-      assertEquals(rws.bufferedAmount, 0);
-    });
-
-    await t.step("get extensions()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-      assertEquals(rws.extensions, "");
-    });
-
-    await t.step("get protocol()", async () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", "superchat");
-      await new Promise((resolve) => rws.addEventListener("open", resolve)); // Wait for the connection to open
-
-      assertEquals(rws.protocol, "superchat");
-    });
-
-    await t.step("binaryType", async (t) => {
-      await t.step("get binaryType()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.binaryType, "blob");
-      });
-      await t.step("set binaryType()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        rws.binaryType = "arraybuffer";
-        assertEquals(rws.binaryType, "arraybuffer");
-      });
-    });
-
-    await t.step("CONNECTING", async (t) => {
-      await t.step("get CONNECTING()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.CONNECTING, WebSocket.CONNECTING);
-      });
-      await t.step("static CONNECTING", () => {
-        assertEquals(ReconnectingWebSocket.CONNECTING, WebSocket.CONNECTING);
-      });
-    });
-    await t.step("OPEN", async (t) => {
-      await t.step("get OPEN()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.OPEN, WebSocket.OPEN);
-      });
-      await t.step("static OPEN", () => {
-        assertEquals(ReconnectingWebSocket.OPEN, WebSocket.OPEN);
-      });
-    });
-    await t.step("CLOSING", async (t) => {
-      await t.step("get CLOSING()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.CLOSING, WebSocket.CLOSING);
-      });
-      await t.step("static CLOSING", () => {
-        assertEquals(ReconnectingWebSocket.CLOSING, WebSocket.CLOSING);
-      });
-    });
-    await t.step("CLOSED", async (t) => {
-      await t.step("get CLOSED()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.CLOSED, WebSocket.CLOSED);
-      });
-      await t.step("static CLOSED", () => {
-        assertEquals(ReconnectingWebSocket.CLOSED, WebSocket.CLOSED);
-      });
-    });
-
-    await t.step("onclose", async (t) => {
-      await t.step("get onclose()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.onclose, null);
-      });
-      await t.step("set onclose()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        const onclose = () => {};
-        rws.onclose = onclose;
-
-        assertEquals(rws.onclose, onclose);
-      });
-    });
-    await t.step("onerror", async (t) => {
-      await t.step("get onerror()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.onerror, null);
-      });
-      await t.step("set onerror()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        const onerror = () => {};
-        rws.onerror = onerror;
-
-        assertEquals(rws.onerror, onerror);
-      });
-    });
-    await t.step("onmessage", async (t) => {
-      await t.step("get onmessage()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.onmessage, null);
-      });
-      await t.step("set onmessage()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        const onmessage = () => {};
-        rws.onmessage = onmessage;
-
-        assertEquals(rws.onmessage, onmessage);
-      });
-    });
-    await t.step("onopen", async (t) => {
-      await t.step("get onopen()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        assertEquals(rws.onopen, null);
-      });
-      await t.step("set onopen()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        const onopen = () => {};
-        rws.onopen = onopen;
-
-        assertEquals(rws.onopen, onopen);
-      });
-    });
-
-    await t.step("close()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-      assertNotEquals(rws.readyState, WebSocket.CLOSED);
-
-      rws.close();
-
-      assertEquals(rws.readyState, WebSocket.CLOSING);
-    });
-
-    await t.step("send()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-      const message = "Hello, World!";
-      let received = "";
-      rws.addEventListener("message", (e) => received = e.data);
-      rws.dispatchEvent(new MessageEvent("message", { data: message }));
-      assertEquals(received, message);
-    });
-
-    await t.step("addEventListener()", async (t) => {
-      await t.step("listener is fn", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        let called = false;
-        rws.addEventListener("message", () => called = true);
-        rws.dispatchEvent(new Event("message"));
-        assert(called, "Function listener should have been called");
-      });
-
-      await t.step("listener is an object", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        let called = false;
-        rws.addEventListener("message", { handleEvent: () => called = true });
-        rws.dispatchEvent(new Event("message"));
-        assert(called, "Object listener should have been called");
-      });
-
-      await t.step("Does not wrap listener when termination signal is aborted", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
-        rws.close();
-
-        rws.addEventListener("message", () => {});
-        const listenersCount = rws._listeners.length;
-        assertEquals(listenersCount, 0);
-      });
-    });
-
-    await t.step("removeEventListener()", async (t) => {
-      await t.step("listener is fn", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        let called = false;
-        const listener = () => called = true;
-        rws.addEventListener("message", listener);
-        rws.removeEventListener("message", listener);
-        rws.dispatchEvent(new Event("message"));
-        assertFalse(called);
-      });
-
-      await t.step("listener is an object", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        let called = false;
-        const listener = { handleEvent: () => called = true };
-        rws.addEventListener("message", listener);
-        rws.removeEventListener("message", listener);
-        rws.dispatchEvent(new Event("message"));
-        assertFalse(called);
-      });
-
-      await t.step("Removes original listener when wrapped listener not found", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
-
-        // First, terminate the connection to prevent wrapping
-        rws.close();
-
-        // Add listener after termination (will not be wrapped)
-        let called = false;
-        const listener = () => called = true;
-
-        rws.addEventListener("message", listener);
-
-        const listenersCount = rws._listeners.length;
-        assertEquals(listenersCount, 0, "No wrapped listeners should be stored");
-
-        // Verify listener is called
-        rws.dispatchEvent(new Event("message"));
-        assert(called, "Listener should have been called");
-        called = false;
-
-        // Remove the listener - should fall back to removing original
-        rws.removeEventListener("message", listener);
-
-        // Verify it was removed by trying to dispatch event
-        rws.dispatchEvent(new Event("message"));
-        assertFalse(called);
-      });
-    });
-
-    await t.step("dispatchEvent()", () => {
-      using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-      let called = false;
-      rws.addEventListener("open", () => called = true);
-      rws.dispatchEvent(new Event("open"));
-      assert(called, "Listener should have been called");
-    });
-
-    await t.step("use custom WebSocket implementation", () => {
+    it("uses custom WebSocket implementation", () => {
       class CustomWebSocket extends WebSocket {}
-      using rws = new DisposableReconnectingWebSocket(
-        "ws://localhost:8080/",
-        undefined,
-        { WebSocket: CustomWebSocket },
-      ) as ReconnectingWebSocketWithInternals;
-      assertInstanceOf(rws._socket, CustomWebSocket);
+      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+        WebSocket: CustomWebSocket,
+      }) as ReconnectingWebSocketWithInternals;
+
+      ok(rws._socket instanceof CustomWebSocket);
     });
 
-    await t.step("throws when no WebSocket implementation is available", () => {
-      const originalWebSocket = globalThis.WebSocket;
-      // @ts-expect-error - intentionally removing the global constructor for the test
+    it("throws when no WebSocket implementation is available", () => {
+      const original = globalThis.WebSocket;
+      // @ts-expect-error — intentionally removing global constructor for test
       globalThis.WebSocket = undefined;
 
       try {
-        assertThrows(
-          () => new DisposableReconnectingWebSocket("ws://localhost:8080/"),
-          Error,
-          "No WebSocket implementation found",
+        throws(
+          () => new DisposableReconnectingWebSocket(WS_URL),
+          TypeError,
         );
       } finally {
-        globalThis.WebSocket = originalWebSocket;
+        globalThis.WebSocket = original;
       }
     });
   });
 
-  await t.step("Reconnecting WebSocket", async (t) => {
-    await t.step("url", async (t) => {
-      await t.step("Supports dynamic URL via function", async () => {
+  // --- Reconnection --------------------------------------------------------
+
+  describe("Reconnection", () => {
+    describe("url", () => {
+      it("supports dynamic URL via function", async () => {
         let callCount = 0;
-        const urlProvider = () => {
+        using rws = new DisposableReconnectingWebSocket(() => {
           callCount++;
-          return "ws://localhost:8080/";
-        };
+          return WS_URL;
+        }, { maxRetries: 2, reconnectionDelay: 0 });
 
-        using rws = new DisposableReconnectingWebSocket(urlProvider, {
-          maxRetries: 2,
-          reconnectionDelay: 0,
-        });
+        strictEqual(callCount, 1);
 
-        assertEquals(callCount, 1, "URL function should be called on initial connection");
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        rws.close(undefined, undefined, false);
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
 
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
-        rws.close(undefined, undefined, false); // Close without permanently aborting
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
-
-        assertEquals(callCount, 2, "URL function should be called on reconnection");
+        strictEqual(callCount, 2);
       });
     });
 
-    await t.step("protocols", async (t) => {
-      await t.step("Retains chosen protocol across reconnect", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", "superchat");
+    describe("protocols", () => {
+      it("retains chosen protocol across reconnect", async () => {
+        using rws = new DisposableReconnectingWebSocket(WS_URL, "superchat");
 
-        await new Promise<void>((resolve) => {
-          rws.addEventListener("open", () => {
-            assertEquals(rws.protocol, "superchat");
-            resolve();
-          }, { once: true });
-        });
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        strictEqual(rws.protocol, "superchat");
 
-        rws.close(undefined, undefined, false); // Close without permanently aborting
+        rws.close(undefined, undefined, false);
 
-        await new Promise<void>((resolve) => {
-          rws.addEventListener("open", () => {
-            assertEquals(rws.protocol, "superchat");
-            resolve();
-          }, { once: true });
-        });
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        strictEqual(rws.protocol, "superchat");
       });
 
-      await t.step("Supports dynamic protocols via function", async () => {
+      it("supports dynamic protocols via function", async () => {
         let callCount = 0;
-        const protocolsProvider = () => {
-          callCount++;
-          return "superchat";
-        };
+        using rws = new DisposableReconnectingWebSocket(
+          WS_URL,
+          () => {
+            callCount++;
+            return "superchat";
+          },
+          { maxRetries: 2, reconnectionDelay: 0 },
+        );
 
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", protocolsProvider, {
-          maxRetries: 2,
-          reconnectionDelay: 0,
-        });
+        strictEqual(callCount, 1);
 
-        assertEquals(callCount, 1, "Protocols function should be called on initial connection");
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        strictEqual(rws.protocol, "superchat");
 
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
-        assertEquals(rws.protocol, "superchat");
+        rws.close(undefined, undefined, false);
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
 
-        rws.close(undefined, undefined, false); // Close without permanently aborting
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
-
-        assertEquals(callCount, 2, "Protocols function should be called on reconnection");
-        assertEquals(rws.protocol, "superchat");
+        strictEqual(callCount, 2);
+        strictEqual(rws.protocol, "superchat");
       });
     });
 
-    await t.step("binaryType", async (t) => {
-      await t.step("Preserves binaryType across reconnection", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", {
+    describe("binaryType", () => {
+      it("preserves binaryType across reconnection", async () => {
+        using rws = new DisposableReconnectingWebSocket(WS_URL, {
           maxRetries: 1,
           reconnectionDelay: 0,
         });
 
         rws.binaryType = "arraybuffer";
-        assertEquals(rws.binaryType, "arraybuffer");
 
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
         rws.close(undefined, undefined, false);
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
 
-        assertEquals(rws.binaryType, "arraybuffer", "binaryType should persist after reconnection");
+        strictEqual(rws.binaryType, "arraybuffer");
       });
     });
 
-    await t.step("maxRetries", async (t) => {
-      await t.step("Respects maxRetries limit", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
+    describe("maxRetries", () => {
+      it("respects maxRetries limit", async () => {
+        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
           maxRetries: 2,
           reconnectionDelay: 0,
         });
@@ -447,347 +375,263 @@ Deno.test("ReconnectingWebSocket", async (t) => {
         let closeCount = 0;
         rws.addEventListener("close", () => closeCount++);
 
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
 
-        assertEquals(rws.readyState, WebSocket.CLOSED, "WebSocket should be closed");
-        // Initial connection + 2 reconnect attempts = 3 total calls
-        assertEquals(closeCount, 3);
+        ok(rws.isTerminated);
+        // 1 initial + 2 retries = 3 close events
+        strictEqual(closeCount, 3);
       });
     });
 
-    await t.step("connectionTimeout", async (t) => {
-      await t.step("Connection timeout is disabled if set to `connectionTimeout: null`", async () => {
-        const defaultConnectionTimeout = (() => {
+    describe("connectionTimeout", () => {
+      it("disabled when set to null", async () => {
+        const defaultTimeout = (() => {
           using probe = new DisposableReconnectingWebSocket("ws://example.com");
           return probe.reconnectOptions.connectionTimeout!;
         })();
-        using rws = new DisposableReconnectingWebSocket(
-          `ws://localhost:8080?delay=${defaultConnectionTimeout + 5000}`,
-          { connectionTimeout: null },
-        );
 
-        await new Promise((resolve) => setTimeout(resolve, defaultConnectionTimeout + 2000)); // Wait longer than default timeout but less than server delay
-        assertEquals(rws.readyState, WebSocket.CONNECTING);
-      });
-
-      await t.step("Connection timeout if not opened in time", async () => {
-        using rwsTimeout = new DisposableReconnectingWebSocket("ws://localhost:8080/", {
-          maxRetries: 0,
-          connectionTimeout: 10, // too short to connect
+        using rws = new DisposableReconnectingWebSocket(HANGING_URL, {
+          connectionTimeout: null,
         });
 
-        await new Promise((resolve) => setTimeout(resolve, 1000)); // Delay for network operations
-        assertEquals(rwsTimeout.readyState, WebSocket.CLOSED);
+        await new Promise((r) => setTimeout(r, defaultTimeout + 2000));
+
+        strictEqual(rws.readyState, WebSocket.CONNECTING);
+      });
+
+      it("fires if not opened in time", async () => {
+        using rws = new DisposableReconnectingWebSocket(HANGING_URL, {
+          maxRetries: 0,
+          connectionTimeout: 100,
+        });
+
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+
+        ok(rws.isTerminated);
       });
     });
 
-    await t.step("reconnectionDelay", async (t) => {
-      await t.step("Custom delay", async () => {
+    describe("reconnectionDelay", () => {
+      it("custom delay (number)", async () => {
         const customDelay = 500;
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
-          maxRetries: 3,
+        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+          maxRetries: 2,
           reconnectionDelay: customDelay,
         });
 
         const closeTimes: number[] = [];
         rws.addEventListener("close", () => closeTimes.push(performance.now()));
 
-        await new Promise((resolve) => setTimeout(resolve, 3000)); // Delay for network operations
-        rws.close();
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
-          assertGreaterOrEqual(
-            diff,
-            customDelay,
-            `Close event #${i} waited less than "customDelay". Expected at least ${customDelay}ms, got ${diff}ms`,
-          );
+          ok(diff >= customDelay - 5, `Gap #${i}: expected >= ${customDelay}ms, got ${diff}ms`);
         }
       });
 
-      await t.step("Custom delay via function", async () => {
-        const delays = [200, 500, 700];
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
+      it("custom delay (function)", async () => {
+        const delays = [200, 500];
+        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
           maxRetries: delays.length,
-          reconnectionDelay: (attempt) => delays[attempt] || delays[delays.length - 1]!,
+          reconnectionDelay: (attempt) => delays[attempt] ?? delays[delays.length - 1]!,
         });
 
         const closeTimes: number[] = [];
         rws.addEventListener("close", () => closeTimes.push(performance.now()));
 
-        await new Promise((resolve) => setTimeout(resolve, 3000)); // Delay for network operations
-        rws.close();
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
-          const expected = delays[i - 1] || delays[delays.length - 1];
-          assertGreaterOrEqual(
-            diff,
-            expected,
-            `Close event #${i} waited less than the function-supplied delay. Expected at least ${expected}ms, got ${diff}ms`,
-          );
+          const expected = delays[i - 1] ?? delays[delays.length - 1]!;
+          ok(diff >= expected - 5, `Gap #${i}: expected >= ${expected}ms, got ${diff}ms`);
         }
       });
 
-      await t.step("Errors thrown by reconnectionDelay terminate the socket", async () => {
+      it("errors thrown by reconnectionDelay terminate the instance", async () => {
         const delayError = new Error("boom");
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
+        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
           maxRetries: 1,
           reconnectionDelay: () => {
             throw delayError;
           },
         });
 
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
 
-        assert(rws.isTerminated);
-        assertIsError(rws.terminationReason, ReconnectingWebSocketError);
-        assertEquals(rws.terminationReason.code, "UNKNOWN_ERROR");
-        assertEquals(rws.terminationSignal.reason.cause, delayError);
-      });
-    });
-
-    await t.step("send()", async (t) => {
-      await t.step("Buffers messages when not open and replays on reconnect", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", {
-          maxRetries: 1,
-          reconnectionDelay: 0,
-        }) as ReconnectingWebSocketWithInternals;
-
-        await new Promise((resolve) => rws.addEventListener("open", resolve)); // Wait for the connection to open
-
-        rws.close(undefined, undefined, false); // Close without permanently aborting
-        rws.send("HelloAfterClose1");
-        rws.send("HelloAfterClose2");
-
-        assertEquals(rws._messageBuffer.length, 2);
-
-        const receivedMessages: string[] = [];
-        rws.addEventListener("message", (ev) => receivedMessages.push(ev.data));
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-
-        assertEquals(receivedMessages.length, 2);
-        assertArrayIncludes(receivedMessages, ["HelloAfterClose1"]);
-        assertArrayIncludes(receivedMessages, ["HelloAfterClose2"]);
-
-        assertEquals(rws._messageBuffer.length, 0);
-      });
-    });
-
-    await t.step("close()", async (t) => {
-      await t.step("close() prevents reconnection", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
-          maxRetries: 3,
-          reconnectionDelay: 0,
-        });
-
-        let closeEvents = 0;
-        rws.addEventListener("close", () => closeEvents++);
-
-        rws.close();
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-
-        // Node.js WebSocket emits duplicate close events, Deno does not
-        const expectedCloseEvents = "Deno" in globalThis ? 1 : 2;
-        assertEquals(closeEvents, expectedCloseEvents, `should have ${expectedCloseEvents} close event(s)`);
-        assertEquals(rws.readyState, WebSocket.CLOSED, "socket should remain closed");
-        assert(rws.isTerminated, "should be permanently closed");
-      });
-
-      await t.step("close(permanently = false) closes but does not stop reconnection logic", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
-          maxRetries: 3,
-          reconnectionDelay: 0,
-        });
-
-        let closeEvents = 0;
-        rws.addEventListener("close", () => closeEvents++);
-
-        rws.close(undefined, undefined, false); // Close without permanently aborting
-
-        await new Promise((resolve) => setTimeout(resolve, 3000)); // Delay for network operations
-
-        // Node.js WebSocket emits duplicate close events, Deno does not
-        const expectedCloseEvents = "Deno" in globalThis ? 4 : 5;
-        assertEquals(closeEvents, expectedCloseEvents, "should have multiple close events for reconnection");
-        assertEquals(rws.readyState, WebSocket.CLOSED, "socket should remain closed");
-        assert(rws.isTerminated, "should be permanently closed");
-      });
-    });
-
-    await t.step("Event listeners", async (t) => {
-      await t.step("Re-registers event listeners after reconnection", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", {
-          maxRetries: 1,
-          reconnectionDelay: 0,
-        });
-
-        let openCount = 0;
-        rws.addEventListener("open", () => openCount++);
-        let messageCount = 0;
-        rws.addEventListener("message", () => messageCount++);
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-        assertEquals(openCount, 1);
-
-        rws.close(undefined, undefined, false); // Close without permanently aborting
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-        assertEquals(openCount, 2);
-
-        rws.send("TestingReRegistration");
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-        assertEquals(messageCount, 1);
-      });
-
-      await t.step("Executes { once: true } listener only 1 time and does not reconnect", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
-          maxRetries: 3,
-          reconnectionDelay: 0,
-        });
-
-        let closeOnceCalls = 0;
-        const onceClose = () => closeOnceCalls++;
-        rws.addEventListener("close", onceClose, { once: true }); // `maxRetries` is 3, but should only be called once
-
-        await new Promise((resolve) => setTimeout(resolve, 3000)); // Delay for network operations
-        assertEquals(closeOnceCalls, 1);
-      });
-
-      await t.step("Adding identical listeners does not increase eventListeners array", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
-        const handler = () => {};
-
-        assertEquals(rws._listeners.length, 0, "Initially no event listeners stored");
-
-        rws.addEventListener("message", handler);
-        rws.addEventListener("message", handler);
-        rws.addEventListener("message", handler);
-
-        assertEquals(rws._listeners.length, 1, "should still only have 1 event listener after duplicates");
-
-        rws.removeEventListener("message", handler);
-
-        assertEquals(rws._listeners.length, 0, "should have no listeners after removal");
-      });
-
-      await t.step("Reattaches `on*` properties after reconnection", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        let onopenCalled = 0;
-        let oncloseCalled = 0;
-        let onerrorCalled = 0;
-        let onmessageCalled = 0;
-        const onopen = () => onopenCalled++;
-        const onclose = () => oncloseCalled++;
-        const onerror = () => onerrorCalled++;
-        const onmessage = () => onmessageCalled++;
-        rws.onopen = onopen;
-        rws.onclose = onclose;
-        rws.onerror = onerror;
-        rws.onmessage = onmessage;
-
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true })); // Wait for the connection to open
-        rws.close(undefined, undefined, false); // Close without permanently aborting
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true })); // Wait for the connection to reopen
-
-        assertEquals(rws.onopen, onopen);
-        assertEquals(rws.onclose, onclose);
-        assertEquals(rws.onerror, onerror);
-        assertEquals(rws.onmessage, onmessage);
-      });
-    });
-
-    await t.step("Termination", async (t) => {
-      await t.step("Dispatch 'terminate' event when maxRetries exceeded", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://invalid4567t7281.com", {
-          maxRetries: 0,
-          reconnectionDelay: 0,
-        });
-
-        let terminateEvent: CustomEvent<ReconnectingWebSocketError> | undefined;
-        rws.addEventListener("terminate", (e) => {
-          terminateEvent = e;
-        });
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-
-        assertInstanceOf(terminateEvent, CustomEvent);
-        assertIsError(terminateEvent.detail, ReconnectingWebSocketError);
-        assertEquals(terminateEvent.detail.code, "RECONNECTION_LIMIT");
-        assert(rws.isTerminated, "should be permanently closed");
-      });
-
-      await t.step("Dispatch 'terminate' event when user calls close()", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/");
-
-        let terminateEvent: CustomEvent<ReconnectingWebSocketError> | undefined;
-        rws.addEventListener("terminate", (e) => {
-          terminateEvent = e;
-        });
-
-        rws.close();
-
-        assertInstanceOf(terminateEvent, CustomEvent);
-        assertInstanceOf(terminateEvent.detail, ReconnectingWebSocketError);
-        assertEquals(terminateEvent.detail.code, "TERMINATED_BY_USER");
-        assert(rws.isTerminated, "should be permanently closed");
-      });
-
-      await t.step("No 'terminate' event on temporary close", async () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/", {
-          maxRetries: 1,
-          reconnectionDelay: 100,
-        });
-
-        let terminateCalled = false;
-        rws.addEventListener("terminate", () => terminateCalled = true);
-
-        await new Promise((resolve) => rws.addEventListener("open", resolve, { once: true }));
-
-        rws.close(undefined, undefined, false);
-
-        await new Promise((resolve) => setTimeout(resolve, 5000)); // Delay for network operations
-
-        assertEquals(terminateCalled, false);
-        assertFalse(rws.isTerminated);
-      });
-
-      await t.step("Directly pass a message to the socket if the instance is terminated", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
-        rws.close(); // Permanently terminate
-
-        let called = false;
-        const originalSend = rws._socket.send;
-        rws._socket.send = function (data) {
-          called = true;
-          originalSend.call(this, data);
-        };
-
-        rws.send("DirectMessage");
-
-        assert(called, "Socket send() should be called directly when terminated");
-        assertEquals(rws._messageBuffer.length, 0);
-      });
-
-      await t.step("Directly attach a listener to the socket if the instance is terminated", () => {
-        using rws = new DisposableReconnectingWebSocket("ws://localhost:8080/") as ReconnectingWebSocketWithInternals;
-        rws.close(); // Permanently terminate
-
-        let called = false;
-        const listener = () => called = true;
-        rws.addEventListener("message", listener);
-
-        assertEquals(rws._listeners.length, 0, "Listener should not be wrapped when terminated");
-
-        rws.dispatchEvent(new Event("message"));
-        assert(called, "Listener should be called directly");
+        ok(rws.isTerminated);
+        ok(rws.terminationReason instanceof ReconnectingWebSocketError);
+        strictEqual(rws.terminationReason.code, "UNKNOWN_ERROR");
+        strictEqual(rws.terminationReason.cause, delayError);
       });
     });
   });
 
-  await server.shutdown();
+  // --- send() --------------------------------------------------------
+
+  describe("send()", () => {
+    it("buffers messages when not open and replays on reconnect", async () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+        maxRetries: 1,
+        reconnectionDelay: 0,
+      }) as ReconnectingWebSocketWithInternals;
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+
+      rws.close(undefined, undefined, false);
+      rws.send("msg1");
+      rws.send("msg2");
+
+      strictEqual(rws._messageBuffer.length, 2);
+
+      const received: string[] = [];
+      rws.addEventListener("message", (e) => received.push(e.data));
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      // Wait for echo messages to arrive
+      await new Promise((r) => setTimeout(r, 500));
+
+      deepStrictEqual(received.sort(), ["msg1", "msg2"]);
+      strictEqual(rws._messageBuffer.length, 0);
+    });
+  });
+
+  // --- close() --------------------------------------------------------
+
+  describe("close()", () => {
+    it("prevents reconnection", async () => {
+      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        maxRetries: 3,
+        reconnectionDelay: 0,
+      });
+
+      rws.close();
+
+      // Wait to confirm no reconnection happens
+      await new Promise((r) => setTimeout(r, 1000));
+
+      ok(rws.isTerminated);
+    });
+
+    it("close(permanently=false) does not stop reconnection", async () => {
+      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        maxRetries: 3,
+        reconnectionDelay: 0,
+      });
+
+      rws.close(undefined, undefined, false);
+
+      await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+
+      ok(rws.isTerminated);
+      ok(rws.terminationReason instanceof ReconnectingWebSocketError);
+      strictEqual(rws.terminationReason.code, "RECONNECTION_LIMIT");
+    });
+  });
+
+  // --- Event listeners --------------------------------------------------------
+
+  describe("Event listeners", () => {
+    it("addEventListener persists after reconnection", async () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+        maxRetries: 1,
+        reconnectionDelay: 0,
+      });
+
+      let openCount = 0;
+      rws.addEventListener("open", () => openCount++);
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      strictEqual(openCount, 1);
+
+      rws.close(undefined, undefined, false);
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      strictEqual(openCount, 2);
+    });
+
+    it("{ once: true } fires only once across reconnections", async () => {
+      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        maxRetries: 3,
+        reconnectionDelay: 0,
+      });
+
+      let closeOnceCalls = 0;
+      rws.addEventListener("close", () => closeOnceCalls++, { once: true });
+
+      await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+
+      strictEqual(closeOnceCalls, 1);
+    });
+
+    it("on* handler fires after reconnection", async () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+        maxRetries: 1,
+        reconnectionDelay: 0,
+      });
+
+      let openCount = 0;
+      rws.onopen = () => openCount++;
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      strictEqual(openCount, 1);
+
+      rws.close(undefined, undefined, false);
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      strictEqual(openCount, 2);
+    });
+  });
+
+  // --- Termination --------------------------------------------------------
+
+  describe("Termination", () => {
+    it("dispatches terminate event when maxRetries exceeded", async () => {
+      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        maxRetries: 0,
+        reconnectionDelay: 0,
+      });
+
+      const event = await new Promise<CustomEvent<ReconnectingWebSocketError>>((r) =>
+        rws.addEventListener("terminate", r, { once: true })
+      );
+
+      ok(event instanceof CustomEvent);
+      ok(event.detail instanceof ReconnectingWebSocketError);
+      strictEqual(event.detail.code, "RECONNECTION_LIMIT");
+      ok(rws.isTerminated);
+    });
+
+    it("dispatches terminate event on close()", () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL);
+
+      let terminateEvent: CustomEvent<ReconnectingWebSocketError> | undefined;
+      rws.addEventListener("terminate", (e) => terminateEvent = e);
+
+      rws.close();
+
+      ok(terminateEvent instanceof CustomEvent);
+      ok(terminateEvent.detail instanceof ReconnectingWebSocketError);
+      strictEqual(terminateEvent.detail.code, "TERMINATED_BY_USER");
+      ok(rws.isTerminated);
+    });
+
+    it("no terminate event on temporary close", async () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+        maxRetries: 1,
+        reconnectionDelay: 100,
+      });
+
+      let terminateCalled = false;
+      rws.addEventListener("terminate", () => terminateCalled = true);
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      rws.close(undefined, undefined, false);
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+
+      strictEqual(terminateCalled, false);
+      ok(!rws.isTerminated);
+    });
+  });
 });

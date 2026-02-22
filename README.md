@@ -4,180 +4,185 @@
 [![JSR](https://jsr.io/badges/@nktkas/rews)](https://jsr.io/@nktkas/rews)
 [![bundlejs](https://img.shields.io/bundlejs/size/@nktkas/rews)](https://bundlejs.com/?q=@nktkas/rews)
 
-WebSocket with auto-reconnection — a drop-in replacement for the standard WebSocket.
+Drop-in [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API) replacement with automatic
+reconnection.
 
-## Installation
+---
 
-### Node.js (choose your package manager)
-
-```
-npm i @nktkas/rews
-
-pnpm add @nktkas/rews
-
-yarn add @nktkas/rews
-```
-
-### Deno
-
-```
-deno add jsr:@nktkas/rews
-```
-
-## Usage
-
-Simply replace `WebSocket` with `ReconnectingWebSocket`:
+**Without rews** — manual reconnection, listener re-attachment, message queuing:
 
 ```ts
-import { ReconnectingWebSocket } from "@nktkas/rews";
-
-// const ws = new WebSocket("wss://...");
-const ws = new ReconnectingWebSocket("wss://...", {
-  // optional reconnection options
-});
-ws.addEventListener("message", (e) => console.log(e.data));
-ws.send("data");
-```
-
-### Options
-
-```ts
-interface ReconnectingWebSocketOptions {
-  /**
-   * Custom WebSocket constructor.
-   * @default globalThis.WebSocket
-   */
-  WebSocket?: new (url: string | URL, protocols?: string | string[]) => WebSocket;
-  /**
-   * Maximum number of reconnection attempts.
-   * @default 3
-   */
-  maxRetries?: number;
-  /**
-   * Maximum time in ms to wait for a connection to open.
-   * Set to `null` to disable.
-   * @default 10_000
-   */
-  connectionTimeout?: number | null;
-  /**
-   * Delay before reconnection in ms.
-   * May be a number or a function that returns a number.
-   * @param attempt - The current attempt number.
-   * @default (attempt) => Math.min(~~(1 << attempt) * 150, 10_000); // Exponential backoff (max 10s)
-   */
-  reconnectionDelay?: number | ((attempt: number) => number);
-}
-```
-
-### Differences from standard WebSocket
-
-#### Automatic Reconnection
-
-`ReconnectingWebSocket` will automatically attempt to reconnect when the connection is lost, up to a configurable number
-of retries.
-
-#### Message Buffering
-
-Messages sent while the connection is closed are buffered and sent once the connection is re-established.
-
-#### Preserved Event Listeners
-
-All event listeners added to the `ReconnectingWebSocket` instance are preserved across reconnections.
-
-#### Dynamic URL and Protocol Providers
-
-The `url` and `protocols` parameters accept functions that return their respective values. These functions are invoked
-on each reconnection attempt, enabling dynamic endpoint resolution or authentication token refresh.
-
-```ts
-const ws = new ReconnectingWebSocket(
-  () => `wss://example.com?token=${getAuthToken()}`,
-  () => ["protocol-v1"],
-);
-```
-
-#### Terminate Event
-
-The `terminate` event fires when the WebSocket permanently closes.
-
-Error Codes:
-
-- `RECONNECTION_LIMIT` - Maximum reconnection attempts reached
-- `TERMINATED_BY_USER` - Closed via `close()` method
-- `UNKNOWN_ERROR` - An unknown error occurred during reconnection
-
-Usage:
-
-```ts
-ws.addEventListener("terminate", (event) => {
-  const error = event.detail; // ReconnectingWebSocketError
-  console.log(error.code); // Error code
-  console.log(error.cause); // Original error if available
-});
-
-// Check termination status manually
-if (ws.isTerminated) {
-  const error = ws.terminationReason!; // ReconnectingWebSocketError
-  console.log(error.code); // Error code
-  console.log(error.cause); // Original error if available
-}
-```
-
-## Why Use This
-
-**Before:**
-
-```ts
-// Requires manual reconnection logic, listener re-attachment, and message buffering
 let ws: WebSocket;
 let attempts = 0;
-const messageHandler = (e) => console.log(e.data);
-const messageQueue: string[] = [];
+const queue: string[] = [];
+const onMessage = (e: MessageEvent) => console.log(e.data);
 
 function connect() {
   ws = new WebSocket("wss://example.com");
-
-  // Re-attach listener on each reconnection
-  ws.addEventListener("message", messageHandler);
-
+  ws.addEventListener("message", onMessage);
   ws.onopen = () => {
     attempts = 0;
-
-    // Send queued messages
-    while (messageQueue.length > 0) {
-      ws.send(messageQueue.shift()!);
-    }
+    while (queue.length) ws.send(queue.shift()!);
   };
-
   ws.onclose = () => {
-    // Attempt reconnection
-    if (attempts++ < 3) {
-      setTimeout(connect, 1000);
-    }
-  };
-
-  ws.onerror = () => {
-    ws.close();
+    if (attempts++ < 3) setTimeout(connect, 1000);
   };
 }
 
 function send(data: string) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(data);
-  } else {
-    messageQueue.push(data); // Buffer message if not connected
-  }
+  ws.readyState === WebSocket.OPEN ? ws.send(data) : queue.push(data);
 }
 
 connect();
-send("data");
+send("hello");
 ```
 
-**After:**
+**With rews:**
 
 ```ts
-// Original WebSocket API remains unchanged despite reconnection logic
+import { ReconnectingWebSocket } from "@nktkas/rews";
+
 const ws = new ReconnectingWebSocket("wss://example.com");
-ws.addEventListener("message", (e) => console.log(e.data)); // listener persists across reconnections
-ws.send("data"); // buffered if disconnected
+ws.addEventListener("message", (e) => console.log(e.data));
+ws.send("hello");
 ```
+
+## How It Works
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant rews
+    participant Server
+
+    Server-->>rews: open  
+    rews-->>App: open event
+
+    App->>rews: send("hello")
+    rews->>Server: "hello"
+    Server-->>rews: "world"
+    rews-->>App: message event
+
+    Server--xrews: connection lost
+    rews-->>App: close event
+    Note over rews: ← standard WebSocket dies here,<br/>App must handle reconnection manually
+
+    Note over rews: reconnecting...
+    rews->>Server: reconnect
+
+    App->>rews: send("hello")
+    Note over rews: buffered
+
+    Server-->>rews: open
+    rews-->>App: open event
+    rews->>Server: "hello" (from buffer)
+    Server-->>rews: "world"
+    rews-->>App: message event
+
+    Note over App: App didn't notice the disruption — just a slight delay
+```
+
+## Features
+
+- **Drop-in replacement** — standard `WebSocket` API, swap one line
+- **Auto-reconnection** — configurable retries with exponential backoff
+- **Persistent listeners** — `addEventListener` and `on*` handlers survive reconnections
+- **Dynamic URL & protocols** — factory functions for per-reconnect resolution
+- **Zero dependencies** — works in Node.js, Deno, Bun, and browsers
+
+## Install
+
+```
+npm i @nktkas/rews        # npm / pnpm / yarn
+deno add jsr:@nktkas/rews # Deno
+bun add @nktkas/rews      # Bun
+```
+
+## Usage
+
+```ts
+import { ReconnectingWebSocket } from "@nktkas/rews";
+
+const ws = new ReconnectingWebSocket("wss://example.com", {
+  maxRetries: 5,
+  reconnectionDelay: (attempt) => Math.min(2 ** attempt * 200, 30_000),
+});
+
+ws.addEventListener("message", (e) => console.log(e.data));
+ws.addEventListener("terminate", (e) => console.error(e.detail.code));
+
+ws.send("hello"); // buffered if not yet connected
+```
+
+## Options
+
+```ts
+interface ReconnectingWebSocketOptions {
+  /** Custom WebSocket constructor. @default globalThis.WebSocket */
+  WebSocket?: typeof WebSocket;
+  /** Maximum number of reconnection attempts. @default 3 */
+  maxRetries?: number;
+  /** Connection timeout in ms (null to disable). @default 10_000 */
+  connectionTimeout?: number | null;
+  /** Delay before reconnection in ms, or a function of attempt number. @default exponential backoff, max 10s */
+  reconnectionDelay?: number | ((attempt: number) => number);
+}
+```
+
+## Beyond Standard WebSocket
+
+### Dynamic URL & Protocols
+
+`url` and `protocols` accept functions, invoked on each reconnection:
+
+```ts
+const ws = new ReconnectingWebSocket(
+  () => `wss://example.com?token=${getToken()}`,
+  () => ["v2"],
+);
+```
+
+### Event Lifecycle
+
+Standard `open`, `close`, `error`, and `message` events fire on **every** connection cycle — not just the first one. A
+single `ReconnectingWebSocket` instance may emit multiple `open`/`close` pairs over its lifetime as it reconnects.
+
+```ts
+ws.addEventListener("open", () => console.log("connected")); // fires on each (re)connection
+ws.addEventListener("close", () => console.log("disconnected")); // fires on each disconnection
+
+// use { once: true } if you only need the first occurrence
+ws.addEventListener("open", () => init(), { once: true });
+```
+
+### Terminate Event
+
+Fires when the connection is permanently closed:
+
+| Code                 | Description                                |
+| -------------------- | ------------------------------------------ |
+| `RECONNECTION_LIMIT` | Max retries exceeded                       |
+| `TERMINATED_BY_USER` | `close()` called                           |
+| `UNKNOWN_ERROR`      | Unhandled error in user-provided functions |
+
+```ts
+ws.addEventListener("terminate", (e) => {
+  e.detail.code; // ReconnectingWebSocketErrorCode
+  e.detail.cause; // original error, if any
+});
+
+ws.isTerminated; // boolean
+ws.terminationReason; // ReconnectingWebSocketError | undefined
+ws.terminationSignal; // AbortSignal
+```
+
+### Closing Behavior
+
+```ts
+ws.close(); // permanently close (default)
+ws.close(code, reason, false); // close current socket only — reconnection continues
+```
+
+## License
+
+[MIT](./LICENSE)
