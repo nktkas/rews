@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 /**
- * @module Test suite for ReconnectingWebSocket.
+ * Test suite for ReconnectingWebSocket.
  *
  * Run:
  * - Deno: `deno test -A mod.test.ts`
@@ -9,26 +9,26 @@
  * - Bun: `bun test --timeout 30000 mod.test.ts`
  */
 
-import process from "node:process";
-import { Buffer } from "node:buffer";
-import { describe, it } from "node:test";
 import { deepStrictEqual, ok, strictEqual, throws } from "node:assert/strict";
+import { Buffer } from "node:buffer";
+import process from "node:process";
+import { describe, it } from "node:test";
 import { ReconnectingWebSocket, ReconnectingWebSocketError } from "./mod.ts";
 
 // ============================================================
 // Test infrastructure
 // ============================================================
 
+type ReconnectingWebSocketWithInternals = DisposableReconnectingWebSocket & {
+  _messageBuffer: ReconnectingWebSocket["_messageBuffer"];
+  _socket: ReconnectingWebSocket["_socket"];
+};
+
 class DisposableReconnectingWebSocket extends ReconnectingWebSocket implements Disposable {
   [Symbol.dispose](): void {
     if (!this.isTerminated) this.close();
   }
 }
-
-type ReconnectingWebSocketWithInternals = DisposableReconnectingWebSocket & {
-  _messageBuffer: ReconnectingWebSocket["_messageBuffer"];
-  _socket: ReconnectingWebSocket["_socket"];
-};
 
 // ============================================================
 // Echo server
@@ -163,7 +163,7 @@ async function createEchoServer(): Promise<EchoServer> {
             }
           }
 
-          // 0x8 = close frame
+          // 0x8 = Close frame
           if (opcode === 0x8) {
             socket.write(Buffer.from([0x88, 0x00]));
             socket.end();
@@ -247,7 +247,7 @@ process.on("exit", () => {
 // ============================================================
 
 describe("ReconnectingWebSocket", () => {
-  // --- Constructor --------------------------------------------------------
+  // --- Constructor ------------------------------------------------------------
 
   describe("Constructor", () => {
     it("on* handlers default to null and round-trip correctly", () => {
@@ -276,7 +276,7 @@ describe("ReconnectingWebSocket", () => {
 
     it("throws when no WebSocket implementation is available", () => {
       const original = globalThis.WebSocket;
-      // @ts-expect-error — intentionally removing global constructor for test
+      // @ts-expect-error — Intentionally removing global constructor for test
       globalThis.WebSocket = undefined;
 
       try {
@@ -290,7 +290,7 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
-  // --- Reconnection --------------------------------------------------------
+  // --- Reconnection ------------------------------------------------------------
 
   describe("Reconnection", () => {
     describe("url", () => {
@@ -468,7 +468,7 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
-  // --- send() --------------------------------------------------------
+  // --- send() ------------------------------------------------------------
 
   describe("send()", () => {
     it("buffers messages when not open and replays on reconnect", async () => {
@@ -497,7 +497,7 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
-  // --- close() --------------------------------------------------------
+  // --- close() ------------------------------------------------------------
 
   describe("close()", () => {
     it("prevents reconnection", async () => {
@@ -530,7 +530,7 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
-  // --- Event listeners --------------------------------------------------------
+  // --- Event listeners ------------------------------------------------------------
 
   describe("Event listeners", () => {
     it("addEventListener persists after reconnection", async () => {
@@ -584,7 +584,7 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
-  // --- Termination --------------------------------------------------------
+  // --- Termination ------------------------------------------------------------
 
   describe("Termination", () => {
     it("dispatches terminate event when maxRetries exceeded", async () => {

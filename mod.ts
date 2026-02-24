@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 /**
- * @module Reconnecting WebSocket with automatic retry logic.
+ * Reconnecting WebSocket with automatic retry logic.
  *
  * Fully compatible with the standard WebSocket API.
  *
@@ -10,6 +10,8 @@
  * - Message buffering while disconnected.
  * - Re-applies event listeners after reconnection.
  * - Dynamic URL and protocols via factory functions.
+ *
+ * @module
  */
 
 // ============================================================
@@ -37,26 +39,26 @@ type ReconnectingWebSocketErrorCode =
 export interface ReconnectingWebSocketOptions {
   /**
    * Custom WebSocket constructor.
-   * @default globalThis.WebSocket
+   *
+   * Default: `globalThis.WebSocket`.
    */
   WebSocket?: new (url: string | URL, protocols?: string | string[]) => WebSocket;
   /**
    * Maximum number of reconnection attempts.
-   * @default 3
+   *
+   * Default: `3`.
    */
   maxRetries?: number;
   /**
    * Maximum time in ms to wait for a connection to open. Set to `null` to disable.
-   * @default 10_000
+   *
+   * Default: `10_000`.
    */
   connectionTimeout?: number | null;
   /**
-   * Delay before reconnection in ms.
+   * Delay before reconnection in ms, or a function of attempt number.
    *
-   * May be a number or a function that returns a number.
-   *
-   * @param attempt - The current attempt number.
-   * @default (n) => Math.min(2 ** n * 150, 10_000); // Exponential backoff (max 10s)
+   * Default: `(n) => Math.min(2 ** n * 150, 10_000)` (Exponential backoff with max 10s).
    */
   reconnectionDelay?: MaybeFn<number, [attempt: number]>;
 }
@@ -86,8 +88,8 @@ export class ReconnectingWebSocketError extends Error {
   /**
    * Create a new {@link ReconnectingWebSocketError}.
    *
-   * @param code - Error code indicating the type of reconnection failure.
-   * @param cause - Underlying error that caused the reconnection failure.
+   * @param code Error code indicating the type of reconnection failure.
+   * @param cause Underlying error that caused the reconnection failure.
    */
   constructor(code: ReconnectingWebSocketErrorCode, cause?: unknown) {
     super(`Error when reconnecting WebSocket: ${code}`);
@@ -108,9 +110,9 @@ export interface ReconnectingWebSocket {
   /**
    * Register an event listener for the specified event type.
    *
-   * @param type - Event type to listen for.
-   * @param listener - Callback function or object with `handleEvent` method.
-   * @param options - Listener options or `useCapture` boolean.
+   * @param type Event type to listen for.
+   * @param listener Callback function or object with `handleEvent` method.
+   * @param options Listener options or `useCapture` boolean.
    */
   addEventListener<K extends keyof ReconnectingWebSocketEventMap>(
     type: K,
@@ -124,9 +126,9 @@ export interface ReconnectingWebSocket {
   /**
    * Remove a previously registered event listener.
    *
-   * @param type - Event type the listener was registered for.
-   * @param listener - The listener to remove.
-   * @param options - Listener options or `useCapture` boolean.
+   * @param type Event type the listener was registered for.
+   * @param listener The listener to remove.
+   * @param options Listener options or `useCapture` boolean.
    */
   removeEventListener<K extends keyof ReconnectingWebSocketEventMap>(
     type: K,
@@ -195,8 +197,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Create a new ReconnectingWebSocket with URL and options.
    *
-   * @param url - URL or factory function for the WebSocket connection.
-   * @param options - Configuration options.
+   * @param url URL or factory function for the WebSocket connection.
+   * @param options Configuration options.
    *
    * @throws {TypeError} If no WebSocket implementation is available.
    */
@@ -204,9 +206,9 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Create a new ReconnectingWebSocket with URL, protocols and options.
    *
-   * @param url - URL or factory function for the WebSocket connection.
-   * @param protocols - Subprotocol(s) or factory function.
-   * @param options - Configuration options.
+   * @param url URL or factory function for the WebSocket connection.
+   * @param protocols Subprotocol(s) or factory function.
+   * @param options Configuration options.
    *
    * @throws {TypeError} If no WebSocket implementation is available.
    */
@@ -214,9 +216,9 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Create a new ReconnectingWebSocket.
    *
-   * @param url - URL or factory function for the WebSocket connection.
-   * @param protocolsOrOptions - Subprotocol(s), factory function, or options object.
-   * @param maybeOptions - Configuration options when protocols are provided as second argument.
+   * @param url URL or factory function for the WebSocket connection.
+   * @param protocolsOrOptions Subprotocol(s), factory function, or options object.
+   * @param maybeOptions Configuration options when protocols are provided as second argument.
    */
   constructor(
     url: UrlProvider,
@@ -258,7 +260,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Create a new WebSocket instance using the current URL and protocols providers.
    *
-   * @returns Configured WebSocket instance.
+   * @return Configured WebSocket instance.
    */
   protected _createSocket(): WebSocket {
     const url = typeof this._urlProvider === "function" ? this._urlProvider() : this._urlProvider;
@@ -350,8 +352,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Permanently terminate the instance and clean up resources.
    *
-   * @param code - Error code indicating the type of termination.
-   * @param cause - Underlying error that triggered cleanup.
+   * @param code Error code indicating the type of termination.
+   * @param cause Underlying error that triggered cleanup.
    */
   protected _cleanup(code: ReconnectingWebSocketErrorCode, cause?: unknown): void {
     if (this.isTerminated) return;
@@ -428,7 +430,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Set the attribute-style handler for `close` events.
    *
-   * @param handler - Event handler function, or `null` to remove.
+   * @param handler Event handler function, or `null` to remove.
    */
   set onclose(handler: ((this: WebSocket, ev: CloseEvent) => any) | null) {
     this._onclose = handler;
@@ -442,7 +444,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Set the attribute-style handler for `error` events.
    *
-   * @param handler - Event handler function, or `null` to remove.
+   * @param handler Event handler function, or `null` to remove.
    */
   set onerror(handler: ((this: WebSocket, ev: Event) => any) | null) {
     this._onerror = handler;
@@ -456,7 +458,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Set the attribute-style handler for `message` events.
    *
-   * @param handler - Event handler function, or `null` to remove.
+   * @param handler Event handler function, or `null` to remove.
    */
   set onmessage(handler: ((this: WebSocket, ev: MessageEvent<any>) => any) | null) {
     this._onmessage = handler;
@@ -470,7 +472,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Set the attribute-style handler for `open` events.
    *
-   * @param handler - Event handler function, or `null` to remove.
+   * @param handler Event handler function, or `null` to remove.
    */
   set onopen(handler: ((this: WebSocket, ev: Event) => any) | null) {
     this._onopen = handler;
@@ -480,8 +482,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Set or remove an attribute-style event listener.
    *
-   * @param type - Event type to manage.
-   * @param listener - Listener function, or `null` to remove.
+   * @param type Event type to manage.
+   * @param listener Listener function, or `null` to remove.
    */
   protected _setAttributeListener(type: AttributeEventType, listener: EventListener | null): void {
     const previous = this._attributeListeners[type];
@@ -500,11 +502,11 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Close the WebSocket connection.
    *
-   * @param code - Status code for the closure.
-   * @param reason - Human-readable reason for the closure.
-   * @param permanently - If `true`, permanently close and stop reconnection.
-   *                      If `false`, close only the current socket without affecting reconnection.
-   *                      Default is `true`.
+   * @param code Status code for the closure.
+   * @param reason Human-readable reason for the closure.
+   * @param permanently If `true`, permanently close and stop reconnection.
+   *                    If `false`, close only the current socket without affecting reconnection.
+   *                    Default: `true`.
    */
   close(code?: number, reason?: string, permanently: boolean = true): void {
     const wasConnecting = this._socket.readyState === ReconnectingWebSocket.CONNECTING;
@@ -525,10 +527,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Send data to the server.
    *
-   * @param data - Data payload to send.
+   * If the connection is not open,
+   * the data is buffered and sent when the connection is established.
    *
-   * @note If the connection is not open,
-   *       the data is buffered and sent when the connection is established.
+   * @param data Data payload to send.
    */
   send(data: WebSocketSendData): void {
     if (this._socket.readyState !== ReconnectingWebSocket.OPEN && !this.isTerminated) {
@@ -546,9 +548,9 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 /**
  * Create a WebSocket with an optional connection timeout.
  *
- * @param socketFactory - Factory function that creates the underlying WebSocket.
- * @param timeout - Maximum time in ms to wait for the connection to open, or `null` to disable.
- * @returns WebSocket instance with timeout handling attached.
+ * @param socketFactory Factory function that creates the underlying WebSocket.
+ * @param timeout Maximum time in ms to wait for the connection to open, or `null` to disable.
+ * @return WebSocket instance with timeout handling attached.
  */
 function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number | null): WebSocket {
   const socket = socketFactory();
@@ -579,8 +581,8 @@ function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number
 /**
  * Wait for a specified duration.
  *
- * @param ms - Duration in milliseconds.
- * @param signal - Abort signal to cancel the wait.
+ * @param ms Duration in milliseconds.
+ * @param signal Abort signal to cancel the wait.
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
