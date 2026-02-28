@@ -5,5 +5,8 @@
   "exports": "./mod.ts",
   "fmt": {
     "lineWidth": 120
+  },
+  "publish": {
+    "exclude": [".github"]
   }
 }
