@@ -506,7 +506,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @param code Status code for the closure.
    * @param reason Human-readable reason for the closure.
    * @param permanently If `true`, permanently close and stop reconnection.
-   *                    If `false`, close only the current socket without affecting reconnection.
+   *                    If `false`, close only the current socket without affecting reconnection (does not work with `maxRetries=0`).
    *                    Default: `true`.
    */
   close(code?: number, reason?: string, permanently: boolean = true): void {
