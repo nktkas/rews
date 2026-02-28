@@ -528,6 +528,14 @@ describe("ReconnectingWebSocket", () => {
       ok(rws.terminationReason instanceof ReconnectingWebSocketError);
       strictEqual(rws.terminationReason.code, "RECONNECTION_LIMIT");
     });
+
+    it("is CLOSED (not CLOSING) after close() during CONNECTING", () => {
+      using rws = new DisposableReconnectingWebSocket(WS_URL);
+
+      strictEqual(rws.readyState, WebSocket.CONNECTING);
+      rws.close();
+      strictEqual(rws.readyState, WebSocket.CLOSED);
+    });
   });
 
   // --- Event listeners ------------------------------------------------------------

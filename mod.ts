@@ -378,6 +378,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   }
 
   get readyState(): number {
+    if (this.isTerminated) return ReconnectingWebSocket.CLOSED;
     return this._socket.readyState;
   }
 
