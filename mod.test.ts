@@ -265,12 +265,13 @@ describe("ReconnectingWebSocket", () => {
       }
     });
 
-    it("uses custom WebSocket implementation", () => {
+    it("uses custom WebSocket implementation", async () => {
       class CustomWebSocket extends WebSocket {}
       using rws = new DisposableReconnectingWebSocket(WS_URL, {
         WebSocket: CustomWebSocket,
       }) as ReconnectingWebSocketWithInternals;
 
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
       ok(rws._socket instanceof CustomWebSocket);
     });
 
@@ -309,6 +310,22 @@ describe("ReconnectingWebSocket", () => {
 
         strictEqual(callCount, 2);
       });
+
+      it("supports async URL via function", async () => {
+        let callCount = 0;
+        using rws = new DisposableReconnectingWebSocket(async () => {
+          callCount++;
+          return await Promise.resolve(WS_URL);
+        }, { maxRetries: 2, reconnectionDelay: 0 });
+
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        strictEqual(callCount, 1);
+
+        rws.close(undefined, undefined, false);
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+
+        strictEqual(callCount, 2);
+      });
     });
 
     describe("protocols", () => {
@@ -338,6 +355,28 @@ describe("ReconnectingWebSocket", () => {
         strictEqual(callCount, 1);
 
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        strictEqual(rws.protocol, "superchat");
+
+        rws.close(undefined, undefined, false);
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+
+        strictEqual(callCount, 2);
+        strictEqual(rws.protocol, "superchat");
+      });
+
+      it("supports async protocols via function", async () => {
+        let callCount = 0;
+        using rws = new DisposableReconnectingWebSocket(
+          WS_URL,
+          async () => {
+            callCount++;
+            return await Promise.resolve("superchat");
+          },
+          { maxRetries: 2, reconnectionDelay: 0 },
+        );
+
+        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        strictEqual(callCount, 1);
         strictEqual(rws.protocol, "superchat");
 
         rws.close(undefined, undefined, false);

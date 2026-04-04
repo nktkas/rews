@@ -18,13 +18,23 @@
 // Types
 // ============================================================
 
+/** Type that can be a value or a Promise of that value. */
+type MaybePromise<T> = T | Promise<T>;
+
 /** Value or factory function that returns the value. */
 type MaybeFn<T, A extends unknown[] = []> = T | ((...args: A) => T);
 
-/** URL or factory function that returns a URL for the WebSocket connection. */
-type UrlProvider = MaybeFn<string | URL>;
-/** Subprotocol(s) or factory function that returns subprotocol(s) for the WebSocket connection. */
-type ProtocolsProvider = MaybeFn<string | string[] | undefined>;
+/** URL or factory function that returns a URL for the WebSocket connection (sync or async). */
+type UrlProvider =
+  | string
+  | URL
+  | (() => MaybePromise<string | URL>);
+/** Subprotocol(s) or factory function that returns subprotocol(s) for the WebSocket connection (sync or async). */
+type ProtocolsProvider =
+  | string
+  | string[]
+  | undefined
+  | (() => MaybePromise<string | string[] | undefined>);
 
 /** Data types accepted by {@link ReconnectingWebSocket.send}. */
 type WebSocketSendData = string | ArrayBufferLike | Blob | ArrayBufferView;
@@ -137,7 +147,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   // --- Protected state -------------------------------------------
 
   /** Current underlying WebSocket instance. */
-  protected _socket!: WebSocket;
+  protected _socket: WebSocket | undefined;
   /** URL provider for creating new connections. */
   protected _urlProvider: UrlProvider;
   /** Protocols provider for creating new connections. */
@@ -254,10 +264,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    *
    * @return Configured WebSocket instance.
    */
-  protected _createSocket(): WebSocket {
-    const url = typeof this._urlProvider === "function" ? this._urlProvider() : this._urlProvider;
+  protected async _createSocket(): Promise<WebSocket> {
+    const url = typeof this._urlProvider === "function" ? await this._urlProvider() : this._urlProvider;
     const protocols = typeof this._protocolsProvider === "function"
-      ? this._protocolsProvider()
+      ? await this._protocolsProvider()
       : this._protocolsProvider;
 
     const socket = createSocketWithTimeout(
@@ -273,7 +283,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   protected async _runLoop(): Promise<void> {
     try {
       while (true) {
-        this._socket = this._createSocket();
+        this._socket = await this._createSocket();
         await this._awaitSocketLifecycle();
         if (this.isTerminated) break;
 
@@ -300,34 +310,34 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       const ac = new AbortController();
       const { signal } = ac;
 
-      this._socket.addEventListener("open", () => {
+      this._socket!.addEventListener("open", () => {
         this._attempt = 0;
 
         // Flush buffered messages — remove only successfully sent on partial failure
         let sentCount = 0;
         try {
           for (; sentCount < this._messageBuffer.length; sentCount++) {
-            this._socket.send(this._messageBuffer[sentCount]!);
+            this._socket!.send(this._messageBuffer[sentCount]!);
           }
           this._messageBuffer = [];
         } catch {
           this._messageBuffer.splice(0, sentCount);
-          this._socket.close();
+          this._socket!.close();
           return;
         }
 
         this.dispatchEvent(new Event("open"));
       }, { signal });
 
-      this._socket.addEventListener("message", (e) => {
+      this._socket!.addEventListener("message", (e) => {
         this.dispatchEvent(new MessageEvent("message", { data: e.data, origin: e.origin }));
       }, { signal });
 
-      this._socket.addEventListener("error", () => {
+      this._socket!.addEventListener("error", () => {
         this.dispatchEvent(new Event("error"));
       }, { signal });
 
-      this._socket.addEventListener("close", (e) => {
+      this._socket!.addEventListener("close", (e) => {
         ac.abort();
         this.dispatchEvent(
           new CloseEvent("close", {
@@ -366,24 +376,24 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   // --- Properties ------------------------------------------------
 
   get url(): string {
-    return this._socket.url;
+    return this._socket?.url ?? "";
   }
 
   get readyState(): number {
     if (this.isTerminated) return ReconnectingWebSocket.CLOSED;
-    return this._socket.readyState;
+    return this._socket?.readyState ?? ReconnectingWebSocket.CONNECTING;
   }
 
   get bufferedAmount(): number {
-    return this._socket.bufferedAmount;
+    return this._socket?.bufferedAmount ?? 0;
   }
 
   get extensions(): string {
-    return this._socket.extensions;
+    return this._socket?.extensions ?? "";
   }
 
   get protocol(): string {
-    return this._socket.protocol;
+    return this._socket?.protocol ?? "";
   }
 
   get binaryType(): BinaryType {
@@ -391,7 +401,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   }
   set binaryType(value: BinaryType) {
     this._binaryType = value;
-    this._socket.binaryType = value;
+    if (this._socket) this._socket.binaryType = value;
   }
 
   // --- Constants -------------------------------------------------
@@ -502,8 +512,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    *                    Default: `true`.
    */
   close(code?: number, reason?: string, permanently: boolean = true): void {
-    const wasConnecting = this._socket.readyState === ReconnectingWebSocket.CONNECTING;
-    this._socket.close(code, reason);
+    const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
+    this._socket?.close(code, reason);
     if (permanently) this._cleanup("TERMINATED_BY_USER");
 
     // HACK: Node.js/Bun don't fire close/error when close() is called during CONNECTING.
@@ -513,7 +523,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     //       removing all listeners before native events fire.
     if (wasConnecting) {
       // 1006 = Abnormal Closure (RFC 6455) — no close frame was received
-      this._socket.dispatchEvent(new CloseEvent("close", { code: 1006, reason: "", wasClean: false }));
+      this._socket?.dispatchEvent(new CloseEvent("close", { code: 1006, reason: "", wasClean: false }));
     }
   }
 
@@ -526,10 +536,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @param data Data payload to send.
    */
   send(data: WebSocketSendData): void {
-    if (this._socket.readyState !== ReconnectingWebSocket.OPEN && !this.isTerminated) {
+    if (this._socket?.readyState !== ReconnectingWebSocket.OPEN && !this.isTerminated) {
       this._messageBuffer.push(data);
     } else {
-      this._socket.send(data);
+      this._socket!.send(data);
     }
   }
 }
