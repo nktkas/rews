@@ -3,13 +3,13 @@
 /**
  * Reconnecting WebSocket with automatic retry logic.
  *
- * Fully compatible with the standard WebSocket API.
- *
  * Features:
- * - Automatic reconnection with configurable max retries and delay.
- * - Message buffering while disconnected.
- * - Re-applies event listeners after reconnection.
- * - Dynamic URL and protocols via factory functions.
+ * - **Drop-in replacement** — standard `WebSocket` API, swap one line
+ * - **Auto-reconnection** — configurable retries and delay strategy
+ * - **Message buffering** — `send()` queues data while offline, flushes on reconnect
+ * - **Persistent listeners** — `addEventListener` and `on*` handlers survive reconnections
+ * - **Dynamic URL & protocols** — resolve fresh values on each reconnection
+ * - **Zero dependencies** — works in Node.js, Deno, Bun, and browsers
  *
  * @module
  */
@@ -39,26 +39,22 @@ type ReconnectingWebSocketErrorCode =
 export interface ReconnectingWebSocketOptions {
   /**
    * Custom WebSocket constructor.
-   *
-   * Default: `globalThis.WebSocket`.
+   * @default `globalThis.WebSocket`
    */
   WebSocket?: new (url: string | URL, protocols?: string | string[]) => WebSocket;
   /**
    * Maximum number of reconnection attempts.
-   *
-   * Default: `3`.
+   * @default `3`
    */
   maxRetries?: number;
   /**
    * Maximum time in ms to wait for a connection to open. Set to `null` to disable.
-   *
-   * Default: `10_000`.
+   * @default `10_000`
    */
   connectionTimeout?: number | null;
   /**
    * Delay before reconnection in ms, or a function of attempt number.
-   *
-   * Default: `(n) => Math.min(2 ** n * 150, 10_000)` (Exponential backoff with max 10s).
+   * @default `(n) => Math.min(2 ** n * 150, 10_000)` - Exponential backoff with max 10s.
    */
   reconnectionDelay?: MaybeFn<number, [attempt: number]>;
 }
@@ -99,13 +95,7 @@ export class ReconnectingWebSocketError extends Error {
   }
 }
 
-/**
- * WebSocket with auto-reconnection logic.
- *
- * Fully compatible with the standard WebSocket API.
- * Automatically reconnects on disconnection with configurable retries and delay.
- * Messages sent while disconnected are buffered and delivered upon reconnection.
- */
+/** WebSocket with auto-reconnection logic. */
 export interface ReconnectingWebSocket {
   /**
    * Register an event listener for the specified event type.
@@ -219,6 +209,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @param url URL or factory function for the WebSocket connection.
    * @param protocolsOrOptions Subprotocol(s), factory function, or options object.
    * @param maybeOptions Configuration options when protocols are provided as second argument.
+   *
+   * @throws {TypeError} If no WebSocket implementation is available.
    */
   constructor(
     url: UrlProvider,

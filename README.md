@@ -37,7 +37,7 @@ connect();
 send("hello");
 ```
 
-**With rews:**
+**With rews** — standard `WebSocket` API, no changes needed:
 
 ```ts
 import { ReconnectingWebSocket } from "@nktkas/rews";
@@ -79,26 +79,37 @@ sequenceDiagram
     Server-->>rews: "world"
     rews-->>App: message event
 
-    Note over App: App didn't notice the disruption — just a slight delay
+    Note over App: App didn't notice the disruption
 ```
 
 ## Features
 
 - **Drop-in replacement** — standard `WebSocket` API, swap one line
-- **Auto-reconnection** — configurable retries with exponential backoff
+- **Auto-reconnection** — configurable retries and delay strategy
+- **Message buffering** — `send()` queues data while offline, flushes on reconnect
 - **Persistent listeners** — `addEventListener` and `on*` handlers survive reconnections
-- **Dynamic URL & protocols** — factory functions for per-reconnect resolution
+- **Dynamic URL & protocols** — resolve fresh values on each reconnection
 - **Zero dependencies** — works in Node.js, Deno, Bun, and browsers
 
 ## Install
 
 ```
-npm i @nktkas/rews        # npm / pnpm / yarn
-deno add jsr:@nktkas/rews # Deno
-bun add @nktkas/rews      # Bun
+npm i @nktkas/rews          # npm
+pnpm add @nktkas/rews       # pnpm
+yarn add @nktkas/rews       # yarn
+deno add jsr:@nktkas/rews   # Deno
+bun add @nktkas/rews        # Bun
 ```
 
-## Usage
+Or import directly via CDN (no install):
+
+```html
+<script type="module">
+  import { ReconnectingWebSocket } from "https://esm.sh/@nktkas/rews";
+</script>
+```
+
+## Usage Example
 
 ```ts
 import { ReconnectingWebSocket } from "@nktkas/rews";
