@@ -4,7 +4,7 @@
  * Build the Deno library for working with NodeJS or publishing to npm.
  *
  * Run:
- * - Deno: `deno run -A .github/scripts/build_npm.ts`
+ * - Deno: deno run -A .github/scripts/build_npm.ts
  */
 
 import { build, emptyDir } from "jsr:@deno/dnt@^0.42.1";
@@ -38,7 +38,7 @@ await build({
     },
     sideEffects: false,
     engines: {
-      node: ">=20.19.0",
+      node: ">=18",
     },
   },
   compilerOptions: {
