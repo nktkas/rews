@@ -330,7 +330,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       }, { signal });
 
       this._socket!.addEventListener("message", (e) => {
-        this.dispatchEvent(new MessageEvent("message", { data: e.data, origin: e.origin }));
+        this.dispatchEvent(new MessageEvent_("message", { data: e.data, origin: e.origin }));
       }, { signal });
 
       this._socket!.addEventListener("error", () => {
@@ -340,7 +340,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       this._socket!.addEventListener("close", (e) => {
         ac.abort();
         this.dispatchEvent(
-          new CloseEvent("close", {
+          new CloseEvent_("close", {
             code: e.code,
             reason: e.reason,
             wasClean: e.wasClean,
@@ -366,7 +366,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     this._socket?.close();
     this._messageBuffer = [];
 
-    this.dispatchEvent(new CustomEvent("terminate", { detail: error }));
+    this.dispatchEvent(new CustomEvent_("terminate", { detail: error }));
   }
 
   // ============================================================
@@ -523,7 +523,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     //       removing all listeners before native events fire.
     if (wasConnecting) {
       // 1006 = Abnormal Closure (RFC 6455) — no close frame was received
-      this._socket?.dispatchEvent(new CloseEvent("close", { code: 1006, reason: "", wasClean: false }));
+      this._socket?.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
     }
   }
 
@@ -543,6 +543,45 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     }
   }
 }
+
+// ============================================================
+// Polyfills — fallbacks for runtimes that lack DOM event constructors (e.g. React Native / Hermes)
+// ============================================================
+
+// deno-lint-ignore no-explicit-any
+const CloseEvent_: typeof CloseEvent = typeof CloseEvent !== "undefined" ? CloseEvent : class extends Event {
+  readonly code: number;
+  readonly reason: string;
+  readonly wasClean: boolean;
+  constructor(type: string, init?: CloseEventInit) {
+    super(type, init);
+    this.code = init?.code ?? 0;
+    this.reason = init?.reason ?? "";
+    this.wasClean = init?.wasClean ?? false;
+  }
+} as any;
+
+// deno-lint-ignore no-explicit-any
+const MessageEvent_: typeof MessageEvent = typeof MessageEvent !== "undefined" ? MessageEvent : class extends Event {
+  readonly data: any;
+  readonly origin: string;
+  readonly lastEventId: string;
+  constructor(type: string, init?: MessageEventInit) {
+    super(type, init);
+    this.data = init?.data ?? null;
+    this.origin = init?.origin ?? "";
+    this.lastEventId = init?.lastEventId ?? "";
+  }
+} as any;
+
+// deno-lint-ignore no-explicit-any
+const CustomEvent_: typeof CustomEvent = typeof CustomEvent !== "undefined" ? CustomEvent : class extends Event {
+  readonly detail: any;
+  constructor(type: string, init?: CustomEventInit) {
+    super(type, init);
+    this.detail = init?.detail ?? null;
+  }
+} as any;
 
 // ============================================================
 // Utilities
@@ -569,7 +608,7 @@ function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number
     //       because the internal close listener calls ac.abort(),
     //       removing all listeners before native events fire.
     if (wasConnecting) {
-      socket.dispatchEvent(new CloseEvent("close", { code: 3008, reason: "Timeout", wasClean: false }));
+      socket.dispatchEvent(new CloseEvent_("close", { code: 3008, reason: "Timeout", wasClean: false }));
     }
   }, timeout);
 
