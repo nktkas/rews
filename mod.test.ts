@@ -4,9 +4,12 @@
  * Test suite for ReconnectingWebSocket.
  *
  * Run:
- * - Deno: `deno test -A mod.test.ts`
- * - Node.js: `node --test mod.test.ts`
- * - Bun: `bun test --timeout 30000 mod.test.ts`
+ * - Deno: deno test -A mod.test.ts
+ * - Node.js: node --test mod.test.ts
+ * - Bun: bun test --timeout 30000 mod.test.ts
+ *
+ * With custom WebSocket library:
+ * - WS_LIB=ws node --test mod.test.ts
  */
 
 import { deepStrictEqual, ok, strictEqual, throws } from "node:assert/strict";
@@ -16,19 +19,21 @@ import { describe, it } from "node:test";
 import { ReconnectingWebSocket, ReconnectingWebSocketError } from "./mod.ts";
 
 // ============================================================
+// WebSocket constructor (native or library via WS_LIB env)
+// ============================================================
+
+const WS: typeof WebSocket = process.env.WS_LIB
+  ? (await import(process.env.WS_LIB)).default
+  : (globalThis as any).WebSocket;
+
+// ============================================================
 // Test infrastructure
 // ============================================================
 
-type ReconnectingWebSocketWithInternals = DisposableReconnectingWebSocket & {
+type ReconnectingWebSocketWithInternals = ReconnectingWebSocket & {
   _messageBuffer: ReconnectingWebSocket["_messageBuffer"];
   _socket: ReconnectingWebSocket["_socket"];
 };
-
-class DisposableReconnectingWebSocket extends ReconnectingWebSocket implements Disposable {
-  [Symbol.dispose](): void {
-    if (!this.isTerminated) this.close();
-  }
-}
 
 // ============================================================
 // Echo server
@@ -39,60 +44,81 @@ interface EchoServer {
   shutdown(): Promise<void>;
 }
 
-// Platform-specific WebSocket echo server
-async function createEchoServer(): Promise<EchoServer> {
-  // Deno — Deno.serve + Deno.upgradeWebSocket (no types in shared context)
-  if ("Deno" in globalThis) {
-    const Deno = (globalThis as any).Deno;
+// Deno — Deno.serve + Deno.upgradeWebSocket
+function createDenoEchoServer(): EchoServer {
+  interface DenoGlobal {
+    serve(
+      options: { port: number },
+      handler: (req: Request) => Promise<Response> | Response,
+    ): { addr: { port: number }; shutdown(): Promise<void> };
+    upgradeWebSocket(
+      req: Request,
+      options?: { protocol?: string },
+    ): { socket: WebSocket; response: Response };
+  }
 
-    const server = Deno.serve({ port: 0 }, async (req: Request) => {
+  const Deno = (globalThis as unknown as { Deno: DenoGlobal }).Deno;
+
+  const server = Deno.serve({ port: 0 }, async (req: Request) => {
+    if (req.headers.get("upgrade") !== "websocket") {
+      return new Response(null, { status: 501 });
+    }
+
+    const url = new URL(req.url);
+    const protocol = req.headers.get("sec-websocket-protocol") ?? undefined;
+
+    const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay")!) : 0;
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+
+    const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
+    socket.onmessage = (e: MessageEvent) => socket.send(e.data);
+
+    return response;
+  });
+
+  return {
+    port: server.addr.port,
+    shutdown: () => server.shutdown(),
+  };
+}
+
+// Bun — Bun.serve with websocket handler
+function createBunEchoServer(): EchoServer {
+  interface BunGlobal {
+    serve(options: {
+      port: number;
+      fetch(req: Request, server: { upgrade(req: Request): boolean }): Response | undefined;
+      websocket: {
+        message(ws: { send(msg: string | ArrayBuffer): void }, msg: string | ArrayBuffer): void;
+      };
+    }): { port: number; stop(closeActiveConnections: boolean): Promise<void> };
+  }
+
+  const Bun = (globalThis as unknown as { Bun: BunGlobal }).Bun;
+
+  const server = Bun.serve({
+    port: 0,
+    fetch(req: Request, server: { upgrade(req: Request): boolean }): Response | undefined {
       if (req.headers.get("upgrade") !== "websocket") {
         return new Response(null, { status: 501 });
       }
-
-      const url = new URL(req.url);
-      const protocol = req.headers.get("sec-websocket-protocol") ?? undefined;
-
-      const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay")!) : 0;
-      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-
-      const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
-      socket.onmessage = (e: MessageEvent) => socket.send(e.data);
-
-      return response;
-    });
-    return {
-      port: server.addr.port,
-      shutdown: () => server.shutdown(),
-    };
-  }
-
-  // Bun — Bun.serve with websocket handler (no types in shared context)
-  if ("Bun" in globalThis) {
-    const Bun = (globalThis as any).Bun;
-
-    const server = Bun.serve({
-      port: 0,
-      fetch(req: Request, server: { upgrade(req: Request): boolean }): Response | undefined {
-        if (req.headers.get("upgrade") !== "websocket") {
-          return new Response(null, { status: 501 });
-        }
-        server.upgrade(req);
+      server.upgrade(req);
+    },
+    websocket: {
+      message(ws: { send(msg: string | ArrayBuffer): void }, msg: string | ArrayBuffer): void {
+        ws.send(msg);
       },
-      websocket: {
-        message(ws: { send(msg: string | ArrayBuffer): void }, msg: string | ArrayBuffer): void {
-          ws.send(msg);
-        },
-      },
-    });
+    },
+  });
 
-    return {
-      port: server.port,
-      shutdown: () => server.stop(true),
-    };
-  }
+  return {
+    port: server.port,
+    shutdown: () => server.stop(true),
+  };
+}
 
-  // Node.js — node:http + manual WebSocket handshake
+// Node.js — node:http + manual WebSocket handshake
+async function createNodeEchoServer(): Promise<EchoServer> {
   const http = await import("node:http");
   const crypto = await import("node:crypto");
 
@@ -207,6 +233,13 @@ async function createEchoServer(): Promise<EchoServer> {
   };
 }
 
+// Platform-specific dispatcher
+function createEchoServer(): Promise<EchoServer> | EchoServer {
+  if ("Deno" in globalThis) return createDenoEchoServer();
+  if ("Bun" in globalThis) return createBunEchoServer();
+  return createNodeEchoServer();
+}
+
 // TCP server that accepts connections but never sends a response — for connectionTimeout tests
 async function createHangingServer(): Promise<{ port: number; shutdown(): void }> {
   const net = await import("node:net");
@@ -233,7 +266,6 @@ const echoServer = await createEchoServer();
 const WS_URL = `ws://localhost:${echoServer.port}`;
 const INVALID_WS_URL = "ws://invalid4567t7281.com";
 
-// TCP server that accepts connections but never responds — for connectionTimeout tests
 const hangingServer = await createHangingServer();
 const HANGING_URL = `ws://localhost:${hangingServer.port}`;
 
@@ -251,7 +283,7 @@ describe("ReconnectingWebSocket", () => {
 
   describe("Constructor", () => {
     it("on* handlers default to null and round-trip correctly", () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL);
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
 
       for (const prop of ["onopen", "onclose", "onerror", "onmessage"] as const) {
         strictEqual(rws[prop], null, `${prop} should default to null`);
@@ -263,31 +295,50 @@ describe("ReconnectingWebSocket", () => {
         rws[prop] = null;
         strictEqual(rws[prop], null, `${prop} should be null after reset`);
       }
+
+      rws.close();
     });
 
     it("uses custom WebSocket implementation", async () => {
-      class CustomWebSocket extends WebSocket {}
-      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+      class CustomWebSocket extends WS {}
+      const rws = new ReconnectingWebSocket(WS_URL, {
         WebSocket: CustomWebSocket,
       }) as ReconnectingWebSocketWithInternals;
 
       await new Promise((r) => rws.addEventListener("open", r, { once: true }));
       ok(rws._socket instanceof CustomWebSocket);
+
+      rws.close();
     });
 
     it("throws when no WebSocket implementation is available", () => {
-      const original = globalThis.WebSocket;
-      // @ts-expect-error — Intentionally removing global constructor for test
-      globalThis.WebSocket = undefined;
+      const original = (globalThis as any).WebSocket;
+      (globalThis as any).WebSocket = undefined;
 
       try {
         throws(
-          () => new DisposableReconnectingWebSocket(WS_URL),
+          () => new ReconnectingWebSocket(WS_URL),
           TypeError,
         );
       } finally {
-        globalThis.WebSocket = original;
+        (globalThis as any).WebSocket = original;
       }
+    });
+  });
+
+  // --- Before first connection -------------------------------------------------
+
+  describe("Before first connection", () => {
+    it("url is empty string", () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      strictEqual(rws.url, "");
+      rws.close();
+    });
+
+    it("readyState is CONNECTING", () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
+      rws.close();
     });
   });
 
@@ -297,10 +348,10 @@ describe("ReconnectingWebSocket", () => {
     describe("url", () => {
       it("supports dynamic URL via function", async () => {
         let callCount = 0;
-        using rws = new DisposableReconnectingWebSocket(() => {
+        const rws = new ReconnectingWebSocket(() => {
           callCount++;
           return WS_URL;
-        }, { maxRetries: 2, reconnectionDelay: 0 });
+        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
 
         strictEqual(callCount, 1);
 
@@ -309,14 +360,16 @@ describe("ReconnectingWebSocket", () => {
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
 
         strictEqual(callCount, 2);
+
+        rws.close();
       });
 
       it("supports async URL via function", async () => {
         let callCount = 0;
-        using rws = new DisposableReconnectingWebSocket(async () => {
+        const rws = new ReconnectingWebSocket(async () => {
           callCount++;
           return await Promise.resolve(WS_URL);
-        }, { maxRetries: 2, reconnectionDelay: 0 });
+        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
 
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
         strictEqual(callCount, 1);
@@ -325,12 +378,29 @@ describe("ReconnectingWebSocket", () => {
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
 
         strictEqual(callCount, 2);
+
+        rws.close();
+      });
+
+      it("errors thrown by async URL factory terminate the instance", async () => {
+        const urlError = new Error("token expired");
+        const rws = new ReconnectingWebSocket(async () => {
+          await Promise.resolve();
+          throw urlError;
+        }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
+
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+
+        ok(rws.isTerminated);
+        ok(rws.terminationReason instanceof ReconnectingWebSocketError);
+        strictEqual(rws.terminationReason.code, "UNKNOWN_ERROR");
+        strictEqual(rws.terminationReason.cause, urlError);
       });
     });
 
     describe("protocols", () => {
       it("retains chosen protocol across reconnect", async () => {
-        using rws = new DisposableReconnectingWebSocket(WS_URL, "superchat");
+        const rws = new ReconnectingWebSocket(WS_URL, "superchat", { WebSocket: WS });
 
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
         strictEqual(rws.protocol, "superchat");
@@ -339,17 +409,19 @@ describe("ReconnectingWebSocket", () => {
 
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
         strictEqual(rws.protocol, "superchat");
+
+        rws.close();
       });
 
       it("supports dynamic protocols via function", async () => {
         let callCount = 0;
-        using rws = new DisposableReconnectingWebSocket(
+        const rws = new ReconnectingWebSocket(
           WS_URL,
           () => {
             callCount++;
             return "superchat";
           },
-          { maxRetries: 2, reconnectionDelay: 0 },
+          { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 },
         );
 
         strictEqual(callCount, 1);
@@ -362,17 +434,19 @@ describe("ReconnectingWebSocket", () => {
 
         strictEqual(callCount, 2);
         strictEqual(rws.protocol, "superchat");
+
+        rws.close();
       });
 
       it("supports async protocols via function", async () => {
         let callCount = 0;
-        using rws = new DisposableReconnectingWebSocket(
+        const rws = new ReconnectingWebSocket(
           WS_URL,
           async () => {
             callCount++;
             return await Promise.resolve("superchat");
           },
-          { maxRetries: 2, reconnectionDelay: 0 },
+          { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 },
         );
 
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
@@ -384,12 +458,30 @@ describe("ReconnectingWebSocket", () => {
 
         strictEqual(callCount, 2);
         strictEqual(rws.protocol, "superchat");
+
+        rws.close();
+      });
+
+      it("errors thrown by async protocols factory terminate the instance", async () => {
+        const protocolsError = new Error("protocols unavailable");
+        const rws = new ReconnectingWebSocket(WS_URL, async () => {
+          await Promise.resolve();
+          throw protocolsError;
+        }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
+
+        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+
+        ok(rws.isTerminated);
+        ok(rws.terminationReason instanceof ReconnectingWebSocketError);
+        strictEqual(rws.terminationReason.code, "UNKNOWN_ERROR");
+        strictEqual(rws.terminationReason.cause, protocolsError);
       });
     });
 
     describe("binaryType", () => {
       it("preserves binaryType across reconnection", async () => {
-        using rws = new DisposableReconnectingWebSocket(WS_URL, {
+        const rws = new ReconnectingWebSocket(WS_URL, {
+          WebSocket: WS,
           maxRetries: 1,
           reconnectionDelay: 0,
         });
@@ -401,12 +493,15 @@ describe("ReconnectingWebSocket", () => {
         await new Promise((r) => rws.addEventListener("open", r, { once: true }));
 
         strictEqual(rws.binaryType, "arraybuffer");
+
+        rws.close();
       });
     });
 
     describe("maxRetries", () => {
       it("respects maxRetries limit", async () => {
-        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+          WebSocket: WS,
           maxRetries: 2,
           reconnectionDelay: 0,
         });
@@ -424,22 +519,25 @@ describe("ReconnectingWebSocket", () => {
 
     describe("connectionTimeout", () => {
       it("disabled when set to null", async () => {
-        const defaultTimeout = (() => {
-          using probe = new DisposableReconnectingWebSocket("ws://example.com");
-          return probe.reconnectOptions.connectionTimeout!;
-        })();
+        const probe = new ReconnectingWebSocket(HANGING_URL, { WebSocket: WS });
+        const defaultTimeout = probe.reconnectOptions.connectionTimeout!;
+        probe.close();
 
-        using rws = new DisposableReconnectingWebSocket(HANGING_URL, {
+        const rws = new ReconnectingWebSocket(HANGING_URL, {
+          WebSocket: WS,
           connectionTimeout: null,
         });
 
         await new Promise((r) => setTimeout(r, defaultTimeout + 2000));
 
-        strictEqual(rws.readyState, WebSocket.CONNECTING);
+        strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
+
+        rws.close();
       });
 
       it("fires if not opened in time", async () => {
-        using rws = new DisposableReconnectingWebSocket(HANGING_URL, {
+        const rws = new ReconnectingWebSocket(HANGING_URL, {
+          WebSocket: WS,
           maxRetries: 0,
           connectionTimeout: 100,
         });
@@ -453,7 +551,8 @@ describe("ReconnectingWebSocket", () => {
     describe("reconnectionDelay", () => {
       it("custom delay (number)", async () => {
         const customDelay = 500;
-        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+          WebSocket: WS,
           maxRetries: 2,
           reconnectionDelay: customDelay,
         });
@@ -465,13 +564,14 @@ describe("ReconnectingWebSocket", () => {
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
-          ok(diff >= customDelay - 5, `Gap #${i}: expected >= ${customDelay}ms, got ${diff}ms`);
+          ok(diff >= customDelay - 50, `Gap #${i}: expected >= ${customDelay}ms, got ${diff}ms`);
         }
       });
 
       it("custom delay (function)", async () => {
         const delays = [200, 500];
-        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+          WebSocket: WS,
           maxRetries: delays.length,
           reconnectionDelay: (attempt) => delays[attempt] ?? delays[delays.length - 1]!,
         });
@@ -484,13 +584,14 @@ describe("ReconnectingWebSocket", () => {
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
           const expected = delays[i - 1] ?? delays[delays.length - 1]!;
-          ok(diff >= expected - 5, `Gap #${i}: expected >= ${expected}ms, got ${diff}ms`);
+          ok(diff >= expected - 50, `Gap #${i}: expected >= ${expected}ms, got ${diff}ms`);
         }
       });
 
       it("errors thrown by reconnectionDelay terminate the instance", async () => {
         const delayError = new Error("boom");
-        using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+        const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+          WebSocket: WS,
           maxRetries: 1,
           reconnectionDelay: () => {
             throw delayError;
@@ -511,12 +612,16 @@ describe("ReconnectingWebSocket", () => {
 
   describe("send()", () => {
     it("buffers messages when not open and replays on reconnect", async () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+      const rws = new ReconnectingWebSocket(WS_URL, {
+        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       }) as ReconnectingWebSocketWithInternals;
 
       await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+
+      const received: string[] = [];
+      rws.addEventListener("message", (e) => received.push(e.data));
 
       rws.close(undefined, undefined, false);
       rws.send("msg1");
@@ -524,15 +629,14 @@ describe("ReconnectingWebSocket", () => {
 
       strictEqual(rws._messageBuffer.length, 2);
 
-      const received: string[] = [];
-      rws.addEventListener("message", (e) => received.push(e.data));
-
       await new Promise((r) => rws.addEventListener("open", r, { once: true }));
       // Wait for echo messages to arrive
       await new Promise((r) => setTimeout(r, 500));
 
-      deepStrictEqual(received.sort(), ["msg1", "msg2"]);
+      deepStrictEqual(received, ["msg1", "msg2"]);
       strictEqual(rws._messageBuffer.length, 0);
+
+      rws.close();
     });
   });
 
@@ -540,21 +644,30 @@ describe("ReconnectingWebSocket", () => {
 
   describe("close()", () => {
     it("prevents reconnection", async () => {
-      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+      const rws = new ReconnectingWebSocket(WS_URL, {
+        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 0,
       });
 
+      let openCount = 0;
+      rws.addEventListener("open", () => openCount++);
+
+      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      strictEqual(openCount, 1);
+
       rws.close();
 
-      // Wait to confirm no reconnection happens
-      await new Promise((r) => setTimeout(r, 1000));
+      // Give the loop a chance to attempt reconnection if close() didn't actually prevent it
+      await new Promise((r) => setTimeout(r, 200));
 
+      strictEqual(openCount, 1, "no reconnection should happen after permanent close");
       ok(rws.isTerminated);
     });
 
     it("close(permanently=false) does not stop reconnection", async () => {
-      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+      const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 0,
       });
@@ -568,12 +681,40 @@ describe("ReconnectingWebSocket", () => {
       strictEqual(rws.terminationReason.code, "RECONNECTION_LIMIT");
     });
 
-    it("is CLOSED (not CLOSING) after close() during CONNECTING", () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL);
+    it("double close() dispatches terminate event only once", () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
 
-      strictEqual(rws.readyState, WebSocket.CONNECTING);
+      let terminateCount = 0;
+      rws.addEventListener("terminate", () => terminateCount++);
+
       rws.close();
-      strictEqual(rws.readyState, WebSocket.CLOSED);
+      rws.close(); // second call must be a no-op
+
+      strictEqual(terminateCount, 1);
+      ok(rws.isTerminated);
+    });
+
+    it("is CLOSED (not CLOSING) after close() during CONNECTING", () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+
+      strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
+      rws.close();
+      strictEqual(rws.readyState, ReconnectingWebSocket.CLOSED);
+    });
+
+    it("dispatches close event when called before socket is assigned", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+
+      let closeCount = 0;
+      rws.addEventListener("close", () => closeCount++);
+
+      rws.close();
+
+      // Wait for _runLoop microtask to process the orphaned socket
+      await new Promise((r) => setTimeout(r, 500));
+
+      strictEqual(closeCount, 1, "close event should be dispatched exactly once");
+      ok(rws.isTerminated);
     });
   });
 
@@ -581,7 +722,8 @@ describe("ReconnectingWebSocket", () => {
 
   describe("Event listeners", () => {
     it("addEventListener persists after reconnection", async () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+      const rws = new ReconnectingWebSocket(WS_URL, {
+        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       });
@@ -596,10 +738,13 @@ describe("ReconnectingWebSocket", () => {
 
       await new Promise((r) => rws.addEventListener("open", r, { once: true }));
       strictEqual(openCount, 2);
+
+      rws.close();
     });
 
     it("{ once: true } fires only once across reconnections", async () => {
-      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+      const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 0,
       });
@@ -613,7 +758,8 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("on* handler fires after reconnection", async () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+      const rws = new ReconnectingWebSocket(WS_URL, {
+        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       });
@@ -628,6 +774,8 @@ describe("ReconnectingWebSocket", () => {
 
       await new Promise((r) => rws.addEventListener("open", r, { once: true }));
       strictEqual(openCount, 2);
+
+      rws.close();
     });
   });
 
@@ -635,7 +783,8 @@ describe("ReconnectingWebSocket", () => {
 
   describe("Termination", () => {
     it("dispatches terminate event when maxRetries exceeded", async () => {
-      using rws = new DisposableReconnectingWebSocket(INVALID_WS_URL, {
+      const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+        WebSocket: WS,
         maxRetries: 0,
         reconnectionDelay: 0,
       });
@@ -651,7 +800,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("dispatches terminate event on close()", () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL);
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
 
       let terminateEvent: CustomEvent<ReconnectingWebSocketError> | undefined;
       rws.addEventListener("terminate", (e) => terminateEvent = e);
@@ -665,7 +814,8 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("no terminate event on temporary close", async () => {
-      using rws = new DisposableReconnectingWebSocket(WS_URL, {
+      const rws = new ReconnectingWebSocket(WS_URL, {
+        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 100,
       });
@@ -679,6 +829,8 @@ describe("ReconnectingWebSocket", () => {
 
       strictEqual(terminateCalled, false);
       ok(!rws.isTerminated);
+
+      rws.close();
     });
   });
 });

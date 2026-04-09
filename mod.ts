@@ -284,6 +284,12 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     try {
       while (true) {
         this._socket = await this._createSocket();
+        if (this.isTerminated) {
+          this._socket.close();
+          this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
+          break;
+        }
+
         await this._awaitSocketLifecycle();
         if (this.isTerminated) break;
 
@@ -298,6 +304,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
           ? this.reconnectOptions.reconnectionDelay
           : this.reconnectOptions.reconnectionDelay(attempt);
         await sleep(delay, this._abortController.signal);
+        if (this.isTerminated) break;
       }
     } catch (error) {
       this._cleanup("UNKNOWN_ERROR", error);
@@ -335,17 +342,20 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
       this._socket!.addEventListener("error", () => {
         this.dispatchEvent(new Event("error"));
+
+        // HACK: Node.js <24 (nodejs/undici#3546) skips the close event
+        //       on connection failure. Resolve the lifecycle directly.
+        //       On compliant runtimes ac.abort() drops the duplicate.
+        if (this._socket!.readyState === ReconnectingWebSocket.CONNECTING) {
+          ac.abort();
+          this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
+          resolve();
+        }
       }, { signal });
 
       this._socket!.addEventListener("close", (e) => {
         ac.abort();
-        this.dispatchEvent(
-          new CloseEvent_("close", {
-            code: e.code,
-            reason: e.reason,
-            wasClean: e.wasClean,
-          }),
-        );
+        this.dispatchEvent(new CloseEvent_("close", e));
         resolve();
       }, { signal });
     });
@@ -513,17 +523,15 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   close(code?: number, reason?: string, permanently: boolean = true): void {
     const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
+
     this._socket?.close(code, reason);
     if (permanently) this._cleanup("TERMINATED_BY_USER");
 
-    // HACK: Node.js/Bun don't fire close/error when close() is called during CONNECTING.
-    //       Manually dispatch to unblock internal listeners.
-    //       Safe for spec-compliant runtimes (Deno/browsers),
-    //       because the internal close listener calls ac.abort(),
-    //       removing all listeners before native events fire.
-    if (wasConnecting) {
-      // 1006 = Abnormal Closure (RFC 6455) — no close frame was received
-      this._socket?.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
+    // HACK: Node.js <24 and Bun skip the close event when close() is called
+    //       during CONNECTING. Dispatch it manually;
+    //       On compliant runtimes ac.abort() drops the duplicate.
+    if (wasConnecting && typeof this._socket?.dispatchEvent === "function") {
+      this._socket.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
     }
   }
 
@@ -539,7 +547,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     if (this._socket?.readyState !== ReconnectingWebSocket.OPEN && !this.isTerminated) {
       this._messageBuffer.push(data);
     } else {
-      this._socket!.send(data);
+      this._socket?.send(data);
     }
   }
 }
@@ -548,7 +556,6 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 // Polyfills — fallbacks for runtimes that lack DOM event constructors (e.g. React Native / Hermes)
 // ============================================================
 
-// deno-lint-ignore no-explicit-any
 const CloseEvent_: typeof CloseEvent = typeof CloseEvent !== "undefined" ? CloseEvent : class extends Event {
   readonly code: number;
   readonly reason: string;
@@ -559,29 +566,32 @@ const CloseEvent_: typeof CloseEvent = typeof CloseEvent !== "undefined" ? Close
     this.reason = init?.reason ?? "";
     this.wasClean = init?.wasClean ?? false;
   }
-} as any;
+};
 
-// deno-lint-ignore no-explicit-any
 const MessageEvent_: typeof MessageEvent = typeof MessageEvent !== "undefined" ? MessageEvent : class extends Event {
   readonly data: any;
   readonly origin: string;
   readonly lastEventId: string;
+  readonly source: MessageEventSource | null;
+  readonly ports: ReadonlyArray<MessagePort>;
   constructor(type: string, init?: MessageEventInit) {
     super(type, init);
     this.data = init?.data ?? null;
     this.origin = init?.origin ?? "";
     this.lastEventId = init?.lastEventId ?? "";
+    this.source = init?.source ?? null;
+    this.ports = init?.ports ?? [];
   }
-} as any;
+  initMessageEvent() {}
+};
 
-// deno-lint-ignore no-explicit-any
 const CustomEvent_: typeof CustomEvent = typeof CustomEvent !== "undefined" ? CustomEvent : class extends Event {
   readonly detail: any;
   constructor(type: string, init?: CustomEventInit) {
     super(type, init);
     this.detail = init?.detail ?? null;
   }
-} as any;
+};
 
 // ============================================================
 // Utilities
@@ -600,14 +610,14 @@ function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number
 
   const timer = setTimeout(() => {
     const wasConnecting = socket.readyState === ReconnectingWebSocket.CONNECTING;
-    // 3008 = Custom close code for connection timeout (private-use range 3000–3999)
+
+    // 3008 = Custom close code for connection timeout
     socket.close(3008, "Timeout");
-    // HACK: Node.js/Bun don't fire close/error when close() is called during CONNECTING.
-    //       Manually dispatch to trigger reconnection.
-    //       Safe for spec-compliant runtimes (Deno/browsers),
-    //       because the internal close listener calls ac.abort(),
-    //       removing all listeners before native events fire.
-    if (wasConnecting) {
+
+    // HACK: Node.js <24 and Bun skip the close event when close() is called
+    //       during CONNECTING. Dispatch it manually;
+    //       On compliant runtimes ac.abort() drops the duplicate.
+    if (wasConnecting && typeof socket.dispatchEvent === "function") {
       socket.dispatchEvent(new CloseEvent_("close", { code: 3008, reason: "Timeout", wasClean: false }));
     }
   }, timeout);
