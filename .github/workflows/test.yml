@@ -24,31 +24,24 @@ jobs:
           deno-version: v2.x
       - run: deno test -A mod.test.ts
 
-  node-22:
+  node:
     strategy:
       fail-fast: false
       matrix:
+        node-version: [22, 24]
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - node-version: 22
+            node-flags: "--experimental-strip-types"
+          - node-version: 24
+            node-flags: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - run: node --experimental-strip-types --test mod.test.ts
-
-  node-24:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-      - run: node --test mod.test.ts
+          node-version: ${{ matrix.node-version }}
+      - run: node ${{ matrix.node-flags }} --test mod.test.ts
 
   bun:
     strategy:
@@ -68,13 +61,41 @@ jobs:
   # ============================================================
 
   ws:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - run: npm install ws
-      - run: node --experimental-strip-types --test mod.test.ts
+          node-version: ${{ matrix.node-version }}
+      - run: echo '{"type":"module"}' > package.json && npm install ws tsx
+      - run: node --import tsx --test mod.test.ts
         env:
           WS_LIB: ws
+
+  undici:
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - node-version: 18
+            undici-version: 6
+          - node-version: 20
+            undici-version: 7
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: echo '{"type":"module"}' > package.json && npm install undici@${{ matrix.undici-version }} tsx
+      - run: node --import tsx --test mod.test.ts
+        env:
+          WS_LIB: undici
+          WS_EXPORT: WebSocket

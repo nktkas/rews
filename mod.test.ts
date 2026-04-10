@@ -10,6 +10,7 @@
  *
  * With custom WebSocket library:
  * - WS_LIB=ws node --test mod.test.ts
+ * - WS_LIB=undici WS_EXPORT=WebSocket node --test mod.test.ts
  */
 
 import { deepStrictEqual, ok, strictEqual, throws } from "node:assert/strict";
@@ -19,11 +20,15 @@ import { describe, it } from "node:test";
 import { ReconnectingWebSocket, ReconnectingWebSocketError } from "./mod.ts";
 
 // ============================================================
-// WebSocket constructor (native or library via WS_LIB env)
+// WebSocket constructor (native or library via WS_LIB / WS_EXPORT env)
 // ============================================================
 
 const WS: typeof WebSocket = process.env.WS_LIB
-  ? (await import(process.env.WS_LIB)).default
+  ? await (async () => {
+    const mod = await import(process.env.WS_LIB!);
+    const key = process.env.WS_EXPORT;
+    return key ? (mod[key] ?? mod.default[key]) : mod.default;
+  })()
   : (globalThis as any).WebSocket;
 
 // ============================================================
@@ -34,6 +39,11 @@ type ReconnectingWebSocketWithInternals = ReconnectingWebSocket & {
   _messageBuffer: ReconnectingWebSocket["_messageBuffer"];
   _socket: ReconnectingWebSocket["_socket"];
 };
+
+/** Wait for a single event on an EventTarget. */
+function once(target: EventTarget, type: string): Promise<Event> {
+  return new Promise((r) => target.addEventListener(type, r, { once: true }));
+}
 
 // ============================================================
 // Echo server
@@ -59,17 +69,12 @@ function createDenoEchoServer(): EchoServer {
 
   const Deno = (globalThis as unknown as { Deno: DenoGlobal }).Deno;
 
-  const server = Deno.serve({ port: 0 }, async (req: Request) => {
+  const server = Deno.serve({ port: 0 }, (req: Request) => {
     if (req.headers.get("upgrade") !== "websocket") {
       return new Response(null, { status: 501 });
     }
 
-    const url = new URL(req.url);
     const protocol = req.headers.get("sec-websocket-protocol") ?? undefined;
-
-    const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay")!) : 0;
-    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-
     const { socket, response } = Deno.upgradeWebSocket(req, { protocol });
     socket.onmessage = (e: MessageEvent) => socket.send(e.data);
 
@@ -134,87 +139,79 @@ async function createNodeEchoServer(): Promise<EchoServer> {
       return;
     }
 
-    const url = new URL(req.url!, `http://${req.headers.host}`);
-    const delay = url.searchParams.has("delay") ? parseInt(url.searchParams.get("delay")!) : 0;
+    const protocol = req.headers["sec-websocket-protocol"];
+    const acceptKey = crypto.createHash("sha1")
+      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
 
-    const completeHandshake = (): void => {
-      const protocol = req.headers["sec-websocket-protocol"];
-      const acceptKey = crypto.createHash("sha1")
-        .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-        .digest("base64");
+    let responseHeaders = "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${acceptKey}\r\n`;
 
-      let responseHeaders = "HTTP/1.1 101 Switching Protocols\r\n" +
-        "Upgrade: websocket\r\n" +
-        "Connection: Upgrade\r\n" +
-        `Sec-WebSocket-Accept: ${acceptKey}\r\n`;
+    if (protocol) {
+      const chosen = protocol.split(",")[0]!.trim();
+      responseHeaders += `Sec-WebSocket-Protocol: ${chosen}\r\n`;
+    }
+    responseHeaders += "\r\n";
+    socket.write(responseHeaders);
 
-      if (protocol) {
-        const chosen = protocol.split(",")[0]!.trim();
-        responseHeaders += `Sec-WebSocket-Protocol: ${chosen}\r\n`;
-      }
-      responseHeaders += "\r\n";
-      socket.write(responseHeaders);
+    // Minimal WebSocket frame parser for echo
+    socket.on("data", (data: Buffer) => {
+      let offset = 0;
+      while (offset < data.length) {
+        const firstByte = data[offset]!;
+        const opcode = firstByte & 0x0f;
+        const secondByte = data[offset + 1]!;
+        const isMasked = (secondByte & 0x80) !== 0;
+        let payloadLength = secondByte & 0x7f;
+        offset += 2;
 
-      // Minimal WebSocket frame parser for echo
-      socket.on("data", (data: Buffer) => {
-        let offset = 0;
-        while (offset < data.length) {
-          const firstByte = data[offset]!;
-          const opcode = firstByte & 0x0f;
-          const secondByte = data[offset + 1]!;
-          const isMasked = (secondByte & 0x80) !== 0;
-          let payloadLength = secondByte & 0x7f;
+        if (payloadLength === 126) {
+          payloadLength = data.readUInt16BE(offset);
           offset += 2;
+        } else if (payloadLength === 127) {
+          payloadLength = Number(data.readBigUInt64BE(offset));
+          offset += 8;
+        }
 
-          if (payloadLength === 126) {
-            payloadLength = data.readUInt16BE(offset);
-            offset += 2;
-          } else if (payloadLength === 127) {
-            payloadLength = Number(data.readBigUInt64BE(offset));
-            offset += 8;
-          }
+        let maskKey: Buffer | null = null;
+        if (isMasked) {
+          maskKey = data.subarray(offset, offset + 4);
+          offset += 4;
+        }
 
-          let maskKey: Buffer | null = null;
-          if (isMasked) {
-            maskKey = data.subarray(offset, offset + 4);
-            offset += 4;
-          }
+        const payload = Buffer.from(data.subarray(offset, offset + payloadLength));
+        offset += payloadLength;
 
-          const payload = Buffer.from(data.subarray(offset, offset + payloadLength));
-          offset += payloadLength;
-
-          if (isMasked && maskKey) {
-            for (let i = 0; i < payload.length; i++) {
-              payload[i] = payload[i]! ^ maskKey[i % 4]!;
-            }
-          }
-
-          // 0x8 = Close frame
-          if (opcode === 0x8) {
-            socket.write(Buffer.from([0x88, 0x00]));
-            socket.end();
-            return;
-          }
-
-          // Echo text (0x1) and binary (0x2) frames
-          if (opcode === 0x1 || opcode === 0x2) {
-            const frameHeader: number[] = [];
-            frameHeader.push(0x80 | opcode); // FIN + opcode
-            if (payload.length < 126) {
-              frameHeader.push(payload.length);
-            } else if (payload.length < 65536) {
-              frameHeader.push(126);
-              frameHeader.push((payload.length >> 8) & 0xff);
-              frameHeader.push(payload.length & 0xff);
-            }
-            socket.write(Buffer.concat([Buffer.from(frameHeader), payload]));
+        if (isMasked && maskKey) {
+          for (let i = 0; i < payload.length; i++) {
+            payload[i] = payload[i]! ^ maskKey[i % 4]!;
           }
         }
-      });
-    };
 
-    if (delay > 0) setTimeout(completeHandshake, delay);
-    else completeHandshake();
+        // 0x8 = Close frame
+        if (opcode === 0x8) {
+          socket.write(Buffer.from([0x88, 0x00]));
+          socket.end();
+          return;
+        }
+
+        // Echo text (0x1) and binary (0x2) frames
+        if (opcode === 0x1 || opcode === 0x2) {
+          const frameHeader: number[] = [];
+          frameHeader.push(0x80 | opcode); // FIN + opcode
+          if (payload.length < 126) {
+            frameHeader.push(payload.length);
+          } else if (payload.length < 65536) {
+            frameHeader.push(126);
+            frameHeader.push((payload.length >> 8) & 0xff);
+            frameHeader.push(payload.length & 0xff);
+          }
+          socket.write(Buffer.concat([Buffer.from(frameHeader), payload]));
+        }
+      }
+    });
   });
 
   const port = await new Promise<number>((resolve) => {
@@ -305,7 +302,7 @@ describe("ReconnectingWebSocket", () => {
         WebSocket: CustomWebSocket,
       }) as ReconnectingWebSocketWithInternals;
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       ok(rws._socket instanceof CustomWebSocket);
 
       rws.close();
@@ -355,9 +352,9 @@ describe("ReconnectingWebSocket", () => {
 
         strictEqual(callCount, 1);
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         rws.close(undefined, undefined, false);
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
 
         strictEqual(callCount, 2);
 
@@ -371,11 +368,11 @@ describe("ReconnectingWebSocket", () => {
           return await Promise.resolve(WS_URL);
         }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         strictEqual(callCount, 1);
 
         rws.close(undefined, undefined, false);
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
 
         strictEqual(callCount, 2);
 
@@ -389,7 +386,7 @@ describe("ReconnectingWebSocket", () => {
           throw urlError;
         }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         ok(rws.isTerminated);
         ok(rws.terminationReason instanceof ReconnectingWebSocketError);
@@ -402,12 +399,12 @@ describe("ReconnectingWebSocket", () => {
       it("retains chosen protocol across reconnect", async () => {
         const rws = new ReconnectingWebSocket(WS_URL, "superchat", { WebSocket: WS });
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
 
         rws.close(undefined, undefined, false);
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
 
         rws.close();
@@ -426,11 +423,11 @@ describe("ReconnectingWebSocket", () => {
 
         strictEqual(callCount, 1);
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
 
         rws.close(undefined, undefined, false);
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
 
         strictEqual(callCount, 2);
         strictEqual(rws.protocol, "superchat");
@@ -449,12 +446,12 @@ describe("ReconnectingWebSocket", () => {
           { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 },
         );
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         strictEqual(callCount, 1);
         strictEqual(rws.protocol, "superchat");
 
         rws.close(undefined, undefined, false);
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
 
         strictEqual(callCount, 2);
         strictEqual(rws.protocol, "superchat");
@@ -469,7 +466,7 @@ describe("ReconnectingWebSocket", () => {
           throw protocolsError;
         }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         ok(rws.isTerminated);
         ok(rws.terminationReason instanceof ReconnectingWebSocketError);
@@ -488,9 +485,9 @@ describe("ReconnectingWebSocket", () => {
 
         rws.binaryType = "arraybuffer";
 
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
         rws.close(undefined, undefined, false);
-        await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+        await once(rws, "open");
 
         strictEqual(rws.binaryType, "arraybuffer");
 
@@ -509,7 +506,7 @@ describe("ReconnectingWebSocket", () => {
         let closeCount = 0;
         rws.addEventListener("close", () => closeCount++);
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         ok(rws.isTerminated);
         // 1 initial + 2 retries = 3 close events
@@ -542,7 +539,7 @@ describe("ReconnectingWebSocket", () => {
           connectionTimeout: 100,
         });
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         ok(rws.isTerminated);
       });
@@ -560,7 +557,7 @@ describe("ReconnectingWebSocket", () => {
         const closeTimes: number[] = [];
         rws.addEventListener("close", () => closeTimes.push(performance.now()));
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
@@ -579,7 +576,7 @@ describe("ReconnectingWebSocket", () => {
         const closeTimes: number[] = [];
         rws.addEventListener("close", () => closeTimes.push(performance.now()));
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
@@ -598,7 +595,7 @@ describe("ReconnectingWebSocket", () => {
           },
         });
 
-        await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+        await once(rws, "terminate");
 
         ok(rws.isTerminated);
         ok(rws.terminationReason instanceof ReconnectingWebSocketError);
@@ -618,7 +615,7 @@ describe("ReconnectingWebSocket", () => {
         reconnectionDelay: 0,
       }) as ReconnectingWebSocketWithInternals;
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
 
       const received: string[] = [];
       rws.addEventListener("message", (e) => received.push(e.data));
@@ -629,7 +626,7 @@ describe("ReconnectingWebSocket", () => {
 
       strictEqual(rws._messageBuffer.length, 2);
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       // Wait for echo messages to arrive
       await new Promise((r) => setTimeout(r, 500));
 
@@ -653,7 +650,7 @@ describe("ReconnectingWebSocket", () => {
       let openCount = 0;
       rws.addEventListener("open", () => openCount++);
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       strictEqual(openCount, 1);
 
       rws.close();
@@ -674,7 +671,7 @@ describe("ReconnectingWebSocket", () => {
 
       rws.close(undefined, undefined, false);
 
-      await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+      await once(rws, "terminate");
 
       ok(rws.isTerminated);
       ok(rws.terminationReason instanceof ReconnectingWebSocketError);
@@ -731,12 +728,12 @@ describe("ReconnectingWebSocket", () => {
       let openCount = 0;
       rws.addEventListener("open", () => openCount++);
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       strictEqual(openCount, 1);
 
       rws.close(undefined, undefined, false);
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       strictEqual(openCount, 2);
 
       rws.close();
@@ -752,7 +749,7 @@ describe("ReconnectingWebSocket", () => {
       let closeOnceCalls = 0;
       rws.addEventListener("close", () => closeOnceCalls++, { once: true });
 
-      await new Promise((r) => rws.addEventListener("terminate", r, { once: true }));
+      await once(rws, "terminate");
 
       strictEqual(closeOnceCalls, 1);
     });
@@ -767,12 +764,12 @@ describe("ReconnectingWebSocket", () => {
       let openCount = 0;
       rws.onopen = () => openCount++;
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       strictEqual(openCount, 1);
 
       rws.close(undefined, undefined, false);
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       strictEqual(openCount, 2);
 
       rws.close();
@@ -789,11 +786,9 @@ describe("ReconnectingWebSocket", () => {
         reconnectionDelay: 0,
       });
 
-      const event = await new Promise<CustomEvent<ReconnectingWebSocketError>>((r) =>
-        rws.addEventListener("terminate", r, { once: true })
-      );
+      const event = await once(rws, "terminate") as CustomEvent<ReconnectingWebSocketError>;
 
-      ok(event instanceof CustomEvent);
+      strictEqual(event.type, "terminate");
       ok(event.detail instanceof ReconnectingWebSocketError);
       strictEqual(event.detail.code, "RECONNECTION_LIMIT");
       ok(rws.isTerminated);
@@ -807,9 +802,10 @@ describe("ReconnectingWebSocket", () => {
 
       rws.close();
 
-      ok(terminateEvent instanceof CustomEvent);
-      ok(terminateEvent.detail instanceof ReconnectingWebSocketError);
-      strictEqual(terminateEvent.detail.code, "TERMINATED_BY_USER");
+      ok(terminateEvent);
+      strictEqual(terminateEvent!.type, "terminate");
+      ok(terminateEvent!.detail instanceof ReconnectingWebSocketError);
+      strictEqual(terminateEvent!.detail.code, "TERMINATED_BY_USER");
       ok(rws.isTerminated);
     });
 
@@ -823,9 +819,9 @@ describe("ReconnectingWebSocket", () => {
       let terminateCalled = false;
       rws.addEventListener("terminate", () => terminateCalled = true);
 
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
       rws.close(undefined, undefined, false);
-      await new Promise((r) => rws.addEventListener("open", r, { once: true }));
+      await once(rws, "open");
 
       strictEqual(terminateCalled, false);
       ok(!rws.isTerminated);
