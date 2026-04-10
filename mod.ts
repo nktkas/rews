@@ -591,6 +591,7 @@ const CustomEvent_: typeof CustomEvent = typeof CustomEvent !== "undefined" ? Cu
     super(type, init);
     this.detail = init?.detail ?? null;
   }
+  initCustomEvent() {}
 };
 
 // ============================================================
