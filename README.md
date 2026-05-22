@@ -180,4 +180,7 @@ ws.close(code, reason, false); // close current socket only — reconnection con
 
 ## License
 
-[MIT](./LICENSE)
+**rews** is licensed under the [MIT License](LICENSE).
+
+Copyright © 2025-2026 present [nktkas](https://github.com/nktkas) and
+[contributors](https://github.com/nktkas/rews/graphs/contributors).
