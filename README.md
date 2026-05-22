@@ -109,22 +109,6 @@ Or import directly via CDN (no install):
 </script>
 ```
 
-## Usage Example
-
-```ts
-import { ReconnectingWebSocket } from "@nktkas/rews";
-
-const ws = new ReconnectingWebSocket("wss://example.com", {
-  maxRetries: 5,
-  reconnectionDelay: (attempt) => Math.min(2 ** attempt * 200, 30_000),
-});
-
-ws.addEventListener("message", (e) => console.log(e.data));
-ws.addEventListener("terminate", (e) => console.error(e.detail.code));
-
-ws.send("hello"); // buffered if not yet connected
-```
-
 ## Options
 
 ```ts
@@ -144,7 +128,7 @@ interface ReconnectingWebSocketOptions {
 
 ### Dynamic URL & Protocols
 
-`url` and `protocols` accept functions, invoked on each reconnection:
+`url` and `protocols` accept functions (mb async), invoked on each reconnection:
 
 ```ts
 const ws = new ReconnectingWebSocket(
