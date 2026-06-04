@@ -109,6 +109,16 @@ Or import directly via CDN (no install):
 </script>
 ```
 
+### React Native
+
+Hermes lacks the global `EventTarget` / `Event` that rews needs — polyfill them before importing rews:
+
+```js
+import { Event, EventTarget } from "event-target-shim";
+if (!globalThis.EventTarget) globalThis.EventTarget = EventTarget;
+if (!globalThis.Event) globalThis.Event = Event;
+```
+
 ## Options
 
 ```ts
