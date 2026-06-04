@@ -165,13 +165,16 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   protected _onopen: ((this: WebSocket, ev: Event) => any) | null = null;
 
   /** Current reconnection attempt number. */
-  protected _attempt = 0;
+  protected _retryCount = 0;
   /** Buffer for messages sent while disconnected. */
   protected _messageBuffer: WebSocketSendData[] = [];
   /** Map of currently active attribute-style listeners. */
   protected _attributeListeners: Partial<Record<AttributeEventType, EventListener>> = {};
   /** Controller used to signal permanent termination. */
   protected _abortController: AbortController = new AbortController();
+
+  /** Resolves the in-flight {@link _awaitSocketLifecycle} promise; `undefined` when idle. */
+  protected _settleLifecycle: ((init: CloseEventInit) => void) | undefined;
 
   // --- Public state ----------------------------------------------
 
@@ -229,12 +232,12 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   ) {
     super();
 
-    const isProtocols = protocolsOrOptions === undefined ||
+    const secondArgIsProtocols = protocolsOrOptions === undefined ||
       typeof protocolsOrOptions === "string" ||
       typeof protocolsOrOptions === "function" ||
       Array.isArray(protocolsOrOptions);
-    const protocols = isProtocols ? protocolsOrOptions : undefined;
-    const options = isProtocols ? maybeOptions : protocolsOrOptions;
+    const protocols = secondArgIsProtocols ? protocolsOrOptions : undefined;
+    const options = secondArgIsProtocols ? maybeOptions : protocolsOrOptions;
 
     if (!globalThis.WebSocket && !options?.WebSocket) {
       throw new TypeError(
@@ -270,13 +273,39 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       ? await this._protocolsProvider()
       : this._protocolsProvider;
 
-    const socket = createSocketWithTimeout(
-      () => new this.reconnectOptions.WebSocket(url, protocols),
-      this.reconnectOptions.connectionTimeout,
-    );
+    const socket = new this.reconnectOptions.WebSocket(url, protocols);
     socket.binaryType = this._binaryType;
+    this._armConnectionTimeout(socket);
 
     return socket;
+  }
+
+  /**
+   * Close the socket and settle its lifecycle if it does not open within the timeout.
+   *
+   * @param socket Socket to monitor.
+   */
+  protected _armConnectionTimeout(socket: WebSocket): void {
+    const timeout = this.reconnectOptions.connectionTimeout;
+    if (timeout === null) return;
+
+    const timer = setTimeout(() => {
+      const wasConnecting = socket.readyState === ReconnectingWebSocket.CONNECTING;
+
+      socket.close();
+
+      // HACK:
+      // Node.js <24, Bun, and React Native skip the close event during CONNECTING.
+      // Settle directly; the identity check guards against a stale timer.
+      if (wasConnecting && this._socket === socket) {
+        this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
+      }
+    }, timeout);
+
+    const cleanup = () => clearTimeout(timer);
+    for (const type of ["open", "close", "error"] as const) {
+      socket.addEventListener(type, cleanup, { once: true });
+    }
   }
 
   /** Run the main reconnection loop. */
@@ -293,16 +322,16 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         await this._awaitSocketLifecycle();
         if (this.isTerminated) break;
 
-        const attempt = this._attempt;
-        if (attempt >= this.reconnectOptions.maxRetries) {
+        const retryCount = this._retryCount;
+        if (retryCount >= this.reconnectOptions.maxRetries) {
           this._cleanup("RECONNECTION_LIMIT");
           break;
         }
-        this._attempt++;
+        this._retryCount++;
 
         const delay = typeof this.reconnectOptions.reconnectionDelay === "number"
           ? this.reconnectOptions.reconnectionDelay
-          : this.reconnectOptions.reconnectionDelay(attempt);
+          : this.reconnectOptions.reconnectionDelay(retryCount);
         await sleep(delay, this._abortController.signal);
         if (this.isTerminated) break;
       }
@@ -317,8 +346,20 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       const ac = new AbortController();
       const { signal } = ac;
 
+      // HACK (nktkas/rews#7):
+      // Ends the lifecycle via the wrapper (`this`), never the socket — avoids RN's
+      // strict EventTarget throwing on a foreign event. Idempotent via the abort signal guard.
+      const settle = (init: CloseEventInit): void => {
+        if (signal.aborted) return; // already settled
+        this._settleLifecycle = undefined;
+        ac.abort();
+        this.dispatchEvent(new CloseEvent_("close", init));
+        resolve();
+      };
+      this._settleLifecycle = settle;
+
       this._socket!.addEventListener("open", () => {
-        this._attempt = 0;
+        this._retryCount = 0;
 
         // Flush buffered messages — remove only successfully sent on partial failure
         let sentCount = 0;
@@ -336,27 +377,22 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         this.dispatchEvent(new Event("open"));
       }, { signal });
 
-      this._socket!.addEventListener("message", (e) => {
-        this.dispatchEvent(new MessageEvent_("message", { data: e.data, origin: e.origin }));
+      this._socket!.addEventListener("message", (event) => {
+        this.dispatchEvent(new MessageEvent_("message", { data: event.data, origin: event.origin }));
       }, { signal });
 
       this._socket!.addEventListener("error", () => {
         this.dispatchEvent(new Event("error"));
 
-        // HACK: Node.js <24 (nodejs/undici#3546) skips the close event
-        //       on connection failure. Resolve the lifecycle directly.
-        //       On compliant runtimes ac.abort() drops the duplicate.
+        // HACK (nodejs/undici#3546):
+        // Node.js <24 skips close on connection failure — settle directly.
         if (this._socket!.readyState === ReconnectingWebSocket.CONNECTING) {
-          ac.abort();
-          this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
-          resolve();
+          settle({ code: 1006, reason: "", wasClean: false });
         }
       }, { signal });
 
-      this._socket!.addEventListener("close", (e) => {
-        ac.abort();
-        this.dispatchEvent(new CloseEvent_("close", e));
-        resolve();
+      this._socket!.addEventListener("close", (event) => {
+        settle({ code: event.code, reason: event.reason, wasClean: event.wasClean });
       }, { signal });
     });
   }
@@ -518,7 +554,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @param code Status code for the closure.
    * @param reason Human-readable reason for the closure.
    * @param permanently If `true`, permanently close and stop reconnection.
-   *                    If `false`, close only the current socket without affecting reconnection (does not work with `maxRetries=0`).
+   *                    If `false`, close only the current socket without affecting reconnection (no effect when `maxRetries=0`).
    *                    Default: `true`.
    */
   close(code?: number, reason?: string, permanently: boolean = true): void {
@@ -527,11 +563,11 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     this._socket?.close(code, reason);
     if (permanently) this._cleanup("TERMINATED_BY_USER");
 
-    // HACK: Node.js <24 and Bun skip the close event when close() is called
-    //       during CONNECTING. Dispatch it manually;
-    //       On compliant runtimes ac.abort() drops the duplicate.
-    if (wasConnecting && typeof this._socket?.dispatchEvent === "function") {
-      this._socket.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
+    // HACK:
+    // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
+    // Settle directly; on compliant runtimes the native close settles first and this is a no-op.
+    if (wasConnecting) {
+      this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
     }
   }
 
@@ -553,43 +589,43 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 }
 
 // ============================================================
-// Polyfills — fallbacks for runtimes that lack DOM event constructors (e.g. React Native / Hermes)
+// Polyfills
 // ============================================================
 
-const CloseEvent_: typeof CloseEvent = typeof CloseEvent !== "undefined" ? CloseEvent : class extends Event {
+const CloseEvent_ = globalThis.CloseEvent || class CloseEvent extends Event {
   readonly code: number;
   readonly reason: string;
   readonly wasClean: boolean;
-  constructor(type: string, init?: CloseEventInit) {
-    super(type, init);
-    this.code = init?.code ?? 0;
-    this.reason = init?.reason ?? "";
-    this.wasClean = init?.wasClean ?? false;
+  constructor(type: string, eventInitDict?: CloseEventInit) {
+    super(type, eventInitDict);
+    this.code = eventInitDict?.code ?? 0;
+    this.reason = eventInitDict?.reason ?? "";
+    this.wasClean = eventInitDict?.wasClean ?? false;
   }
 };
 
-const MessageEvent_: typeof MessageEvent = typeof MessageEvent !== "undefined" ? MessageEvent : class extends Event {
-  readonly data: any;
+const MessageEvent_ = globalThis.MessageEvent || class MessageEvent<T> extends Event {
+  readonly data: T | null;
   readonly origin: string;
   readonly lastEventId: string;
   readonly source: MessageEventSource | null;
   readonly ports: ReadonlyArray<MessagePort>;
-  constructor(type: string, init?: MessageEventInit) {
-    super(type, init);
-    this.data = init?.data ?? null;
-    this.origin = init?.origin ?? "";
-    this.lastEventId = init?.lastEventId ?? "";
-    this.source = init?.source ?? null;
-    this.ports = init?.ports ?? [];
+  constructor(type: string, eventInitDict?: MessageEventInit<T>) {
+    super(type, eventInitDict);
+    this.data = eventInitDict?.data ?? null;
+    this.origin = eventInitDict?.origin ?? "";
+    this.lastEventId = eventInitDict?.lastEventId ?? "";
+    this.source = eventInitDict?.source ?? null;
+    this.ports = eventInitDict?.ports ?? [];
   }
   initMessageEvent() {}
 };
 
-const CustomEvent_: typeof CustomEvent = typeof CustomEvent !== "undefined" ? CustomEvent : class extends Event {
-  readonly detail: any;
-  constructor(type: string, init?: CustomEventInit) {
-    super(type, init);
-    this.detail = init?.detail ?? null;
+const CustomEvent_ = globalThis.CustomEvent || class CustomEvent<T> extends Event {
+  readonly detail: T | null;
+  constructor(type: string, eventInitDict?: CustomEventInit<T>) {
+    super(type, eventInitDict);
+    this.detail = eventInitDict?.detail ?? null;
   }
   initCustomEvent() {}
 };
@@ -597,39 +633,6 @@ const CustomEvent_: typeof CustomEvent = typeof CustomEvent !== "undefined" ? Cu
 // ============================================================
 // Utilities
 // ============================================================
-
-/**
- * Create a WebSocket with an optional connection timeout.
- *
- * @param socketFactory Factory function that creates the underlying WebSocket.
- * @param timeout Maximum time in ms to wait for the connection to open, or `null` to disable.
- * @return WebSocket instance with timeout handling attached.
- */
-function createSocketWithTimeout(socketFactory: () => WebSocket, timeout: number | null): WebSocket {
-  const socket = socketFactory();
-  if (timeout === null) return socket;
-
-  const timer = setTimeout(() => {
-    const wasConnecting = socket.readyState === ReconnectingWebSocket.CONNECTING;
-
-    // 3008 = Custom close code for connection timeout
-    socket.close(3008, "Timeout");
-
-    // HACK: Node.js <24 and Bun skip the close event when close() is called
-    //       during CONNECTING. Dispatch it manually;
-    //       On compliant runtimes ac.abort() drops the duplicate.
-    if (wasConnecting && typeof socket.dispatchEvent === "function") {
-      socket.dispatchEvent(new CloseEvent_("close", { code: 3008, reason: "Timeout", wasClean: false }));
-    }
-  }, timeout);
-
-  const cleanup = () => clearTimeout(timer);
-  for (const type of ["open", "close", "error"] as const) {
-    socket.addEventListener(type, cleanup, { once: true });
-  }
-
-  return socket;
-}
 
 /**
  * Wait for a specified duration.
