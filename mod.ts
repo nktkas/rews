@@ -392,7 +392,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       }, { signal });
 
       this._socket!.addEventListener("close", (event) => {
-        settle({ code: event.code, reason: event.reason, wasClean: event.wasClean });
+        // Some runtimes report code 0 (reserved by RFC 6455) when the connection fails
+        settle({ code: event.code || 1006, reason: event.reason, wasClean: event.wasClean });
       }, { signal });
     });
   }
@@ -422,7 +423,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   // --- Properties ------------------------------------------------
 
   get url(): string {
-    return this._socket?.url ?? "";
+    if (this._socket) return this._socket.url;
+    return typeof this._urlProvider === "function" ? "" : String(this._urlProvider);
   }
 
   get readyState(): number {
@@ -483,7 +485,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   set onclose(handler: ((this: WebSocket, ev: CloseEvent) => any) | null) {
     this._onclose = handler;
-    this._setAttributeListener("close", handler ? (event) => handler.call(this, event as CloseEvent) : null);
+    this._setAttributeListener("close", handler);
   }
 
   /** Attribute-style handler for `error` events. */
@@ -497,7 +499,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   set onerror(handler: ((this: WebSocket, ev: Event) => any) | null) {
     this._onerror = handler;
-    this._setAttributeListener("error", handler ? (event) => handler.call(this, event as Event) : null);
+    this._setAttributeListener("error", handler);
   }
 
   /** Attribute-style handler for `message` events. */
@@ -511,7 +513,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   set onmessage(handler: ((this: WebSocket, ev: MessageEvent<any>) => any) | null) {
     this._onmessage = handler;
-    this._setAttributeListener("message", handler ? (event) => handler.call(this, event as MessageEvent) : null);
+    this._setAttributeListener("message", handler);
   }
 
   /** Attribute-style handler for `open` events. */
@@ -525,23 +527,26 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   set onopen(handler: ((this: WebSocket, ev: Event) => any) | null) {
     this._onopen = handler;
-    this._setAttributeListener("open", handler ? (event) => handler.call(this, event as Event) : null);
+    this._setAttributeListener("open", handler);
   }
 
   /**
-   * Set or remove an attribute-style event listener.
+   * Attach or detach the dispatcher for an attribute-style event handler.
    *
    * @param type Event type to manage.
-   * @param listener Listener function, or `null` to remove.
+   * @param handler Current handler, or `null` to detach.
    */
-  protected _setAttributeListener(type: AttributeEventType, listener: EventListener | null): void {
-    const previous = this._attributeListeners[type];
-    if (previous) super.removeEventListener(type, previous);
+  protected _setAttributeListener(type: AttributeEventType, handler: object | null): void {
+    const active = this._attributeListeners[type];
 
-    if (listener) {
-      this._attributeListeners[type] = listener;
-      super.addEventListener(type, listener);
-    } else {
+    if (handler && !active) {
+      const dispatch = (event: Event) => {
+        this[`_on${type}`]?.call(this, event as CloseEvent & MessageEvent);
+      };
+      this._attributeListeners[type] = dispatch;
+      super.addEventListener(type, dispatch);
+    } else if (!handler && active) {
+      super.removeEventListener(type, active);
       delete this._attributeListeners[type];
     }
   }

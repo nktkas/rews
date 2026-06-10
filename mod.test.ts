@@ -326,8 +326,14 @@ describe("ReconnectingWebSocket", () => {
   // --- Before first connection -------------------------------------------------
 
   describe("Before first connection", () => {
-    it("url is empty string", () => {
+    it("url returns the configured URL", () => {
       const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      strictEqual(rws.url, WS_URL);
+      rws.close();
+    });
+
+    it("url is empty string when the URL is a function", () => {
+      const rws = new ReconnectingWebSocket(() => WS_URL, { WebSocket: WS });
       strictEqual(rws.url, "");
       rws.close();
     });
@@ -681,6 +687,28 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
+  // --- close event ------------------------------------------------------------
+
+  describe("close event", () => {
+    it("reports code 1006 when the connection fails", async () => {
+      // A freshly released port: connection refused
+      const net = await import("node:net");
+      const probe = net.createServer();
+      const port = await new Promise<number>((resolve) => {
+        probe.listen(0, () => resolve((probe.address() as { port: number }).port));
+      });
+      await new Promise((resolve) => probe.close(resolve));
+
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        WebSocket: WS,
+        maxRetries: 0,
+      });
+
+      const event = await once(rws, "close") as CloseEvent;
+      strictEqual(event.code, 1006);
+    });
+  });
+
   // --- close() ------------------------------------------------------------
 
   describe("close()", () => {
@@ -796,6 +824,20 @@ describe("ReconnectingWebSocket", () => {
       await once(rws, "terminate");
 
       strictEqual(closeOnceCalls, 1);
+    });
+
+    it("reassigning an on* handler keeps its position among listeners", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+
+      const calls: string[] = [];
+      rws.onopen = () => calls.push("attr-old");
+      rws.addEventListener("open", () => calls.push("listener"));
+      rws.onopen = () => calls.push("attr");
+
+      await once(rws, "open");
+      deepStrictEqual(calls, ["attr", "listener"]);
+
+      rws.close();
     });
 
     it("on* handler fires after reconnection", async () => {
