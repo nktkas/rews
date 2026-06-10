@@ -133,6 +133,8 @@ interface ReconnectingWebSocketOptions {
   stableTimeout?: number;
   /** Delay before reconnection in ms, or a function of attempt number. @default exponential backoff with jitter, max 10s */
   reconnectionDelay?: number | ((attempt: number) => number);
+  /** Decide whether to reconnect after a non-user closure. @default () => true */
+  shouldReconnect?: (event: CloseEvent, attempt: number) => boolean;
 }
 ```
 
@@ -167,11 +169,12 @@ ws.addEventListener("open", () => init(), { once: true });
 `terminationSignal` is an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) that aborts when
 the connection is permanently closed. The abort reason is always a `ReconnectingWebSocketError`:
 
-| Code                 | Description                                |
-| -------------------- | ------------------------------------------ |
-| `RECONNECTION_LIMIT` | Max retries exceeded                       |
-| `TERMINATED_BY_USER` | `close()` called                           |
-| `UNKNOWN_ERROR`      | Unhandled error in user-provided functions |
+| Code                    | Description                                |
+| ----------------------- | ------------------------------------------ |
+| `RECONNECTION_LIMIT`    | Max retries exceeded                       |
+| `RECONNECTION_DECLINED` | `shouldReconnect` returned `false`         |
+| `TERMINATED_BY_USER`    | `close()` called                           |
+| `UNKNOWN_ERROR`         | Unhandled error in user-provided functions |
 
 ```ts
 ws.terminationSignal.aborted; // boolean

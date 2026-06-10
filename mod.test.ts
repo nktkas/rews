@@ -727,6 +727,44 @@ describe("ReconnectingWebSocket", () => {
       });
     });
 
+    describe("shouldReconnect", () => {
+      it("false terminates with RECONNECTION_DECLINED", async () => {
+        const port = await getClosedPort();
+        const seen: [number, number][] = [];
+        const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+          WebSocket: WS,
+          shouldReconnect: (event, attempt) => {
+            seen.push([event.code, attempt]);
+            return false;
+          },
+        });
+
+        const reason = await terminated(rws);
+
+        strictEqual(reason.code, "RECONNECTION_DECLINED");
+        deepStrictEqual(seen, [[1006, 0]]);
+      });
+
+      it("is not consulted for user-initiated closures", async () => {
+        let calls = 0;
+        const rws = new ReconnectingWebSocket(WS_URL, {
+          WebSocket: WS,
+          shouldReconnect: () => {
+            calls++;
+            return true;
+          },
+        });
+
+        await once(rws, "open");
+        rws.reconnect();
+        await once(rws, "open");
+        rws.close();
+        await once(rws, "close");
+
+        strictEqual(calls, 0);
+      });
+    });
+
     describe("reconnectionDelay", () => {
       it("default delay applies equal jitter within [delay/2, delay]", () => {
         const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });

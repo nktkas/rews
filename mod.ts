@@ -42,6 +42,7 @@ type WebSocketSendData = string | ArrayBufferLike | Blob | ArrayBufferView;
 /** Error code indicating the type of reconnection failure. */
 type ReconnectingWebSocketErrorCode =
   | "RECONNECTION_LIMIT"
+  | "RECONNECTION_DECLINED"
   | "TERMINATED_BY_USER"
   | "UNKNOWN_ERROR";
 
@@ -74,6 +75,13 @@ export interface ReconnectingWebSocketOptions {
    * @default Exponential backoff `2 ** n * 150` capped at 10s, with equal jitter.
    */
   reconnectionDelay?: MaybeFn<number, [attempt: number]>;
+  /**
+   * Decide whether to reconnect after a non-user closure. Return `false` to permanently terminate.
+   *
+   * Not consulted for `close()` and `reconnect()` calls.
+   * @default `() => true`
+   */
+  shouldReconnect?: (event: CloseEvent, attempt: number) => boolean;
 }
 
 /** Event types supported by attribute-style event handlers (`onopen`, `onclose`, etc.). */
@@ -88,6 +96,7 @@ export class ReconnectingWebSocketError extends Error {
   /**
    * Error code indicating the type of reconnection error:
    * - `RECONNECTION_LIMIT`: Maximum reconnection attempts reached.
+   * - `RECONNECTION_DECLINED`: `shouldReconnect` returned `false`.
    * - `TERMINATED_BY_USER`: Closed via `close()` method.
    * - `UNKNOWN_ERROR`: Unhandled error in user-provided functions.
    */
@@ -255,6 +264,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         const delay = Math.min(2 ** n * 150, 10_000);
         return delay / 2 + Math.random() * (delay / 2);
       }),
+      shouldReconnect: options?.shouldReconnect ?? (() => true),
     };
 
     // Background reconnection loop — handles its own errors via _cleanup
@@ -326,16 +336,19 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         const reconnectRequested = this._reconnectRequested;
         this._reconnectRequested = false;
 
-        if (
-          !reconnectRequested && !this.terminationSignal.aborted &&
-          this._retryCount >= this.reconnectOptions.maxRetries
-        ) {
-          this._cleanup("RECONNECTION_LIMIT");
-        }
         // HACK (nktkas/rews#7):
         // Dispatch a freshly constructed event on `this`, never the socket's own —
         // React Native's strict EventTarget throws on a foreign event.
-        this.dispatchEvent(new CloseEvent_("close", closeInit));
+        const closeEvent = new CloseEvent_("close", closeInit);
+
+        if (!reconnectRequested && !this.terminationSignal.aborted) {
+          if (!this.reconnectOptions.shouldReconnect(closeEvent, this._retryCount)) {
+            this._cleanup("RECONNECTION_DECLINED");
+          } else if (this._retryCount >= this.reconnectOptions.maxRetries) {
+            this._cleanup("RECONNECTION_LIMIT");
+          }
+        }
+        this.dispatchEvent(closeEvent);
         if (this.terminationSignal.aborted) return;
 
         if (!reconnectRequested) {
