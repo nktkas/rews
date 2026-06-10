@@ -910,6 +910,15 @@ describe("ReconnectingWebSocket", () => {
       strictEqual(event.code, 1006);
     });
 
+    it("settles a connection that fails before listeners can attach", async () => {
+      // Port 1 is fetch-blocked: Node.js fails it synchronously, before any listener attaches
+      const rws = new ReconnectingWebSocket("ws://127.0.0.1:1", { maxRetries: 0 });
+
+      const event = await once(rws, "close") as CloseEvent;
+      strictEqual(event.code, 1006);
+      strictEqual(rws.terminationSignal.aborted, true);
+    });
+
     it("aborts terminationSignal before the final close on reconnection limit", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {

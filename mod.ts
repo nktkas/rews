@@ -376,8 +376,16 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
   /** Await the full lifecycle of the current socket until it closes. */
   protected _awaitSocketLifecycle(): Promise<CloseEventInit> {
+    const socket = this._socket!;
+
+    // HACK:
+    // Node.js fails connections to fetch-blocked ports synchronously, so the close
+    // event has already fired by the time this subscription runs. Settle immediately.
+    if (socket.readyState === ReconnectingWebSocket.CLOSED) {
+      return Promise.resolve({ code: 1006, reason: "", wasClean: false });
+    }
+
     return new Promise<CloseEventInit>((resolve) => {
-      const socket = this._socket!;
       const ac = new AbortController();
       const { signal } = ac;
 
