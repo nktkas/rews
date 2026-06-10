@@ -187,9 +187,12 @@ and other platform APIs.
 ### Closing Behavior
 
 ```ts
-ws.close(); // permanently close (default)
-ws.close(code, reason, false); // close current socket only — reconnection continues
+ws.close(code?, reason?); // permanently close — the standard WebSocket method
+ws.reconnect(code?, reason?); // drop the current connection and reconnect immediately
 ```
+
+`reconnect()` skips the current retry delay, is not counted towards `maxRetries`, and does nothing once the instance is
+permanently terminated.
 
 ## License
 

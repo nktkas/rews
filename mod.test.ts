@@ -379,7 +379,7 @@ describe("ReconnectingWebSocket", () => {
       await once(rws, "open");
       strictEqual(rws.readyState, ReconnectingWebSocket.OPEN);
 
-      rws.close(undefined, undefined, false);
+      rws.reconnect();
       await once(rws, "close");
       strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
 
@@ -402,7 +402,7 @@ describe("ReconnectingWebSocket", () => {
         strictEqual(callCount, 1);
 
         await once(rws, "open");
-        rws.close(undefined, undefined, false);
+        rws.reconnect();
         await once(rws, "open");
 
         strictEqual(callCount, 2);
@@ -420,7 +420,7 @@ describe("ReconnectingWebSocket", () => {
         await once(rws, "open");
         strictEqual(callCount, 1);
 
-        rws.close(undefined, undefined, false);
+        rws.reconnect();
         await once(rws, "open");
 
         strictEqual(callCount, 2);
@@ -450,7 +450,7 @@ describe("ReconnectingWebSocket", () => {
         await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
 
-        rws.close(undefined, undefined, false);
+        rws.reconnect();
 
         await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
@@ -474,7 +474,7 @@ describe("ReconnectingWebSocket", () => {
         await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
 
-        rws.close(undefined, undefined, false);
+        rws.reconnect();
         await once(rws, "open");
 
         strictEqual(callCount, 2);
@@ -498,7 +498,7 @@ describe("ReconnectingWebSocket", () => {
         strictEqual(callCount, 1);
         strictEqual(rws.protocol, "superchat");
 
-        rws.close(undefined, undefined, false);
+        rws.reconnect();
         await once(rws, "open");
 
         strictEqual(callCount, 2);
@@ -549,7 +549,7 @@ describe("ReconnectingWebSocket", () => {
         rws.binaryType = "arraybuffer";
 
         await once(rws, "open");
-        rws.close(undefined, undefined, false);
+        rws.reconnect();
         await once(rws, "open");
 
         strictEqual(rws.binaryType, "arraybuffer");
@@ -710,7 +710,7 @@ describe("ReconnectingWebSocket", () => {
       const received: string[] = [];
       rws.addEventListener("message", (e) => received.push(e.data));
 
-      rws.close(undefined, undefined, false);
+      rws.reconnect();
       rws.send("msg1");
       rws.send("msg2");
 
@@ -831,19 +831,17 @@ describe("ReconnectingWebSocket", () => {
       ok(rws.terminationSignal.aborted);
     });
 
-    it("close(permanently=false) does not stop reconnection", async () => {
-      const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-        WebSocket: WS,
-        maxRetries: 3,
-        reconnectionDelay: 0,
-      });
+    it("close() with invalid arguments throws without side effects", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
 
-      rws.close(undefined, undefined, false);
+      throws(() => rws.close(1), (e: Error) => e.name === "InvalidAccessError");
+      throws(() => rws.close(1000, "x".repeat(124)), (e: Error) => e.name === "SyntaxError");
 
-      const reason = await terminated(rws);
+      await once(rws, "open");
+      throws(() => rws.close(1), (e: Error) => e.name === "InvalidAccessError");
 
-      ok(reason instanceof ReconnectingWebSocketError);
-      strictEqual(reason.code, "RECONNECTION_LIMIT");
+      ok(!rws.terminationSignal.aborted);
+      rws.close();
     });
 
     it("double close() keeps the original termination reason", () => {
@@ -880,6 +878,55 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
+  // --- reconnect() ------------------------------------------------------------
+
+  describe("reconnect()", () => {
+    it("does not stop reconnection", async () => {
+      const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
+        WebSocket: WS,
+        maxRetries: 3,
+        reconnectionDelay: 0,
+      });
+
+      rws.reconnect();
+
+      const reason = await terminated(rws);
+
+      ok(reason instanceof ReconnectingWebSocketError);
+      strictEqual(reason.code, "RECONNECTION_LIMIT");
+    });
+
+    it("reconnects instead of terminating at maxRetries: 0", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS, maxRetries: 0 });
+      await once(rws, "open");
+
+      const reopened = once(rws, "open");
+      rws.reconnect();
+      await reopened;
+
+      ok(!rws.terminationSignal.aborted);
+      rws.close();
+    });
+
+    it("skips the current retry delay", async () => {
+      const port = await getClosedPort();
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        WebSocket: WS,
+        maxRetries: 5,
+        reconnectionDelay: 60_000,
+      });
+
+      await once(rws, "close"); // first attempt failed; the loop is sleeping
+      const nextClose = once(rws, "close");
+
+      rws.reconnect();
+
+      await nextClose; // arrives immediately instead of after the 60s delay
+      ok(!rws.terminationSignal.aborted);
+      rws.close();
+    });
+  });
+
   // --- Event listeners ------------------------------------------------------------
 
   describe("Event listeners", () => {
@@ -896,7 +943,7 @@ describe("ReconnectingWebSocket", () => {
       await once(rws, "open");
       strictEqual(openCount, 1);
 
-      rws.close(undefined, undefined, false);
+      rws.reconnect();
 
       await once(rws, "open");
       strictEqual(openCount, 2);
@@ -946,7 +993,7 @@ describe("ReconnectingWebSocket", () => {
       await once(rws, "open");
       strictEqual(openCount, 1);
 
-      rws.close(undefined, undefined, false);
+      rws.reconnect();
 
       await once(rws, "open");
       strictEqual(openCount, 2);
@@ -990,7 +1037,7 @@ describe("ReconnectingWebSocket", () => {
       });
 
       await once(rws, "open");
-      rws.close(undefined, undefined, false);
+      rws.reconnect();
       await once(rws, "open");
 
       ok(!rws.terminationSignal.aborted);

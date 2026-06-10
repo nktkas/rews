@@ -169,6 +169,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
   /** Resolves the in-flight {@link _awaitSocketLifecycle} promise; `undefined` when idle. */
   protected _settleLifecycle: ((init: CloseEventInit) => void) | undefined;
+  /** Resolves the in-flight retry delay; `undefined` when not sleeping. */
+  protected _skipDelay: (() => void) | undefined;
+  /** Set while a user-requested reconnect closes the current socket; that close is not counted as a retry. */
+  protected _reconnectRequested = false;
 
   // --- Public state ----------------------------------------------
 
@@ -308,7 +312,13 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
         const closeInit = await this._awaitSocketLifecycle();
 
-        if (!this.terminationSignal.aborted && this._retryCount >= this.reconnectOptions.maxRetries) {
+        const reconnectRequested = this._reconnectRequested;
+        this._reconnectRequested = false;
+
+        if (
+          !reconnectRequested && !this.terminationSignal.aborted &&
+          this._retryCount >= this.reconnectOptions.maxRetries
+        ) {
           this._cleanup("RECONNECTION_LIMIT");
         }
         // HACK (nktkas/rews#7):
@@ -317,14 +327,20 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         this.dispatchEvent(new CloseEvent_("close", closeInit));
         if (this.terminationSignal.aborted) return;
 
-        const retryCount = this._retryCount;
-        this._retryCount++;
+        if (!reconnectRequested) {
+          const retryCount = this._retryCount;
+          this._retryCount++;
 
-        const delay = typeof this.reconnectOptions.reconnectionDelay === "number"
-          ? this.reconnectOptions.reconnectionDelay
-          : this.reconnectOptions.reconnectionDelay(retryCount);
-        await sleep(delay, this.terminationSignal);
-        if (this.terminationSignal.aborted) break;
+          const delay = typeof this.reconnectOptions.reconnectionDelay === "number"
+            ? this.reconnectOptions.reconnectionDelay
+            : this.reconnectOptions.reconnectionDelay(retryCount);
+          await new Promise<void>((resolve) => {
+            this._skipDelay = resolve;
+            sleep(delay, this.terminationSignal).then(resolve);
+          });
+          this._skipDelay = undefined;
+          if (this.terminationSignal.aborted) break;
+        }
       }
     } catch (error) {
       this._cleanup("UNKNOWN_ERROR", error);
@@ -543,19 +559,55 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   // --- Public methods --------------------------------------------
 
   /**
-   * Close the WebSocket connection.
+   * Permanently close the WebSocket connection and stop reconnection.
    *
    * @param code Status code for the closure.
    * @param reason Human-readable reason for the closure.
-   * @param permanently If `true`, permanently close and stop reconnection.
-   *                    If `false`, close only the current socket without affecting reconnection (no effect when `maxRetries=0`).
-   *                    Default: `true`.
+   *
+   * @throws {DOMException} If the code is not 1000 or in 3000-4999, or the reason is longer than 123 UTF-8 bytes.
    */
-  close(code?: number, reason?: string, permanently: boolean = true): void {
+  close(code?: number, reason?: string): void {
+    validateCloseArgs(code, reason);
+
     const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
 
     this._socket?.close(code, reason);
-    if (permanently) this._cleanup("TERMINATED_BY_USER");
+    this._cleanup("TERMINATED_BY_USER");
+
+    // HACK:
+    // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
+    // Settle directly; on compliant runtimes the native close settles first and this is a no-op.
+    if (wasConnecting) {
+      this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
+    }
+  }
+
+  /**
+   * Drop the current connection and reconnect immediately.
+   *
+   * Closes the current socket without counting it towards `maxRetries`, or skips
+   * the current retry delay. Does nothing once permanently terminated.
+   *
+   * @param code Status code for closing the current socket.
+   * @param reason Human-readable reason for the closure.
+   *
+   * @throws {DOMException} If the code is not 1000 or in 3000-4999, or the reason is longer than 123 UTF-8 bytes.
+   */
+  reconnect(code?: number, reason?: string): void {
+    validateCloseArgs(code, reason);
+    if (this.terminationSignal.aborted) return;
+
+    if (this._skipDelay) {
+      this._skipDelay();
+      return;
+    }
+
+    const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
+
+    if (this._socket && this._socket.readyState !== ReconnectingWebSocket.CLOSED) {
+      this._reconnectRequested = true;
+      this._socket.close(code, reason);
+    }
 
     // HACK:
     // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
@@ -598,6 +650,13 @@ const CloseEvent_ = globalThis.CloseEvent || class CloseEvent extends Event {
   }
 };
 
+const DOMException_ = globalThis.DOMException || class DOMException extends Error {
+  constructor(message = "", name = "Error") {
+    super(message);
+    this.name = name;
+  }
+};
+
 const MessageEvent_ = globalThis.MessageEvent || class MessageEvent<T> extends Event {
   readonly data: T | null;
   readonly origin: string;
@@ -618,6 +677,24 @@ const MessageEvent_ = globalThis.MessageEvent || class MessageEvent<T> extends E
 // ============================================================
 // Utilities
 // ============================================================
+
+/**
+ * Validate close code and reason per the WHATWG WebSocket specification.
+ *
+ * @param code Status code to validate.
+ * @param reason Reason string to validate.
+ */
+function validateCloseArgs(code?: number, reason?: string): void {
+  if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) {
+    throw new DOMException_(
+      `The close code must be either 1000, or between 3000 and 4999. ${code} is neither.`,
+      "InvalidAccessError",
+    );
+  }
+  if (reason !== undefined && new TextEncoder().encode(reason).length > 123) {
+    throw new DOMException_("The close reason must not be greater than 123 UTF-8 bytes.", "SyntaxError");
+  }
+}
 
 /**
  * Wait for a specified duration. Resolves early when the signal aborts.
