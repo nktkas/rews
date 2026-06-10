@@ -123,8 +123,6 @@ if (!globalThis.Event) globalThis.Event = Event;
 
 ```ts
 interface ReconnectingWebSocketOptions {
-  /** Custom WebSocket constructor. @default globalThis.WebSocket */
-  WebSocket?: typeof WebSocket;
   /** Maximum number of consecutive failed reconnection attempts. @default Infinity */
   maxRetries?: number;
   /** Connection timeout in ms (null to disable). @default 10_000 */
@@ -151,7 +149,9 @@ const ws = new ReconnectingWebSocket(
 );
 ```
 
-Errors thrown by these functions count as failed connection attempts and follow the normal retry flow.
+Errors thrown by these functions count as failed connection attempts and follow the normal retry flow. The same applies
+to a permanently invalid URL: with the default `maxRetries: Infinity` it is retried forever, each close event carrying
+the error in its `reason`.
 
 ### Event Lifecycle
 
@@ -165,6 +165,11 @@ ws.addEventListener("close", () => console.log("disconnected")); // fires on eac
 // use { once: true } if you only need the first occurrence
 ws.addEventListener("open", () => init(), { once: true });
 ```
+
+### readyState
+
+`CLOSED` means permanently terminated. While reconnecting — a retry pause, a connection attempt, a url/protocols factory
+await — `readyState` is `CONNECTING`; `CLOSING` is never reported.
 
 ### Termination
 

@@ -7,10 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ============================================================
-  # Native WebSocket runtimes
-  # ============================================================
-
   deno:
     strategy:
       fail-fast: false
@@ -55,54 +51,3 @@ jobs:
         with:
           bun-version: 1.x
       - run: bun test --timeout 30000 mod.test.ts
-
-  # ============================================================
-  # WebSocket libraries (custom constructor)
-  # ============================================================
-
-  ws:
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24]
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - node-version: 22
-            node-flags: "--experimental-strip-types"
-          - node-version: 24
-            node-flags: ""
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node-version }}
-      - run: npm install ws
-      - run: node ${{ matrix.node-flags }} --test mod.test.ts
-        env:
-          WS_LIB: ws
-
-  undici:
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24]
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - node-version: 22
-            undici-version: 6
-            node-flags: "--experimental-strip-types"
-          - node-version: 24
-            undici-version: 7
-            node-flags: ""
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node-version }}
-      - run: npm install undici@${{ matrix.undici-version }}
-      - run: node ${{ matrix.node-flags }} --test mod.test.ts
-        env:
-          WS_LIB: undici
-          WS_EXPORT: WebSocket

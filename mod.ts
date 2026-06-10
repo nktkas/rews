@@ -21,9 +21,6 @@
 /** Type that can be a value or a Promise of that value. */
 type MaybePromise<T> = T | Promise<T>;
 
-/** Value or factory function that returns the value. */
-type MaybeFn<T, A extends unknown[] = []> = T | ((...args: A) => T);
-
 /** URL or factory function that returns a URL for the WebSocket connection (sync or async). */
 type UrlProvider =
   | string
@@ -49,11 +46,6 @@ type ReconnectingWebSocketErrorCode =
 /** Configuration options for the {@link ReconnectingWebSocket}. */
 export interface ReconnectingWebSocketOptions {
   /**
-   * Custom WebSocket constructor.
-   * @default `globalThis.WebSocket`
-   */
-  WebSocket?: new (url: string | URL, protocols?: string | string[]) => WebSocket;
-  /**
    * Maximum number of consecutive failed reconnection attempts.
    *
    * The counter resets after a connection stays open for {@link stableTimeout}.
@@ -62,6 +54,8 @@ export interface ReconnectingWebSocketOptions {
   maxRetries?: number;
   /**
    * Maximum time in ms to wait for a connection to open. Set to `null` to disable.
+   *
+   * Does not limit the time spent in url/protocols factories.
    * @default `10_000`
    */
   connectionTimeout?: number | null;
@@ -71,13 +65,14 @@ export interface ReconnectingWebSocketOptions {
    */
   stableTimeout?: number;
   /**
-   * Delay before reconnection in ms, or a function of attempt number.
+   * Delay before reconnection in ms, or a function of the attempt number (0-based).
    * @default Exponential backoff `2 ** n * 150` capped at 10s, with equal jitter.
    */
-  reconnectionDelay?: MaybeFn<number, [attempt: number]>;
+  reconnectionDelay?: number | ((attempt: number) => number);
   /**
    * Decide whether to reconnect after a non-user closure. Return `false` to permanently terminate.
    *
+   * Receives the close event and the attempt number (0-based).
    * Not consulted for `close()` and `reconnect()` calls.
    * @default `() => true`
    */
@@ -101,51 +96,39 @@ export class ReconnectingWebSocketError extends Error {
    * - `UNKNOWN_ERROR`: Unhandled error outside a connection attempt (e.g. in `reconnectionDelay` or `shouldReconnect`).
    */
   readonly code: ReconnectingWebSocketErrorCode;
-  /**
-   * Create a new {@link ReconnectingWebSocketError}.
-   *
-   * @param code Error code indicating the type of reconnection failure.
-   * @param cause Underlying error that caused the reconnection failure.
-   */
+
   constructor(code: ReconnectingWebSocketErrorCode, cause?: unknown) {
-    super(`Error when reconnecting WebSocket: ${code}`);
+    super(`WebSocket permanently terminated: ${code}`, { cause });
     this.name = "ReconnectingWebSocketError";
-    this.cause = cause;
     this.code = code;
   }
 }
 
 /** WebSocket with auto-reconnection logic. */
 export interface ReconnectingWebSocket {
-  /**
-   * Register an event listener for the specified event type.
-   *
-   * @param type Event type to listen for.
-   * @param listener Callback function or object with `handleEvent` method.
-   * @param options Listener options or `useCapture` boolean.
-   */
+  /** Register an event listener for the specified event type. */
   addEventListener<K extends keyof WebSocketEventMap>(
     type: K,
-    listener:
-      | ((ev: WebSocketEventMap[K]) => any)
-      | { handleEvent: (event: WebSocketEventMap[K]) => any }
-      | null,
+    listener: (this: ReconnectingWebSocket, ev: WebSocketEventMap[K]) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  /** Register an event listener for a custom event type. */
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
     options?: boolean | AddEventListenerOptions,
   ): void;
 
-  /**
-   * Remove a previously registered event listener.
-   *
-   * @param type Event type the listener was registered for.
-   * @param listener The listener to remove.
-   * @param options Listener options or `useCapture` boolean.
-   */
+  /** Remove a previously registered event listener. */
   removeEventListener<K extends keyof WebSocketEventMap>(
     type: K,
-    listener:
-      | ((ev: WebSocketEventMap[K]) => any)
-      | { handleEvent: (event: WebSocketEventMap[K]) => any }
-      | null,
+    listener: (this: ReconnectingWebSocket, ev: WebSocketEventMap[K]) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  /** Remove a previously registered listener for a custom event type. */
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
     options?: boolean | EventListenerOptions,
   ): void;
 }
@@ -156,14 +139,28 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
   // --- Protected state -------------------------------------------
 
+  /** URL provider for creating new connections. */
+  protected readonly _urlProvider: UrlProvider;
+  /** Protocols provider for creating new connections. */
+  protected readonly _protocolsProvider: ProtocolsProvider;
+
   /** Current underlying WebSocket instance. */
   protected _socket: WebSocket | undefined;
-  /** URL provider for creating new connections. */
-  protected _urlProvider: UrlProvider;
-  /** Protocols provider for creating new connections. */
-  protected _protocolsProvider: ProtocolsProvider;
   /** Binary data type for the WebSocket. */
   protected _binaryType: BinaryType = "blob";
+  /** Buffer for messages sent while disconnected. */
+  protected _messageBuffer: WebSocketSendData[] = [];
+
+  /** Current reconnection attempt number. */
+  protected _retryCount = 0;
+  /** Resolves the in-flight {@link _awaitSocketLifecycle} promise; `undefined` when idle. */
+  protected _settleLifecycle: ((init: CloseEventInit) => void) | undefined;
+  /** Resolves the in-flight retry delay; `undefined` when not sleeping. */
+  protected _skipDelay: (() => void) | undefined;
+  /** Set while a user-requested reconnect closes the current socket; that close is not counted as a retry. */
+  protected _reconnectRequested = false;
+  /** Skips the upcoming retry delay; set by {@link reconnect} when no sleep is active. */
+  protected _skipNextDelay = false;
 
   /** Attribute-style listener for the `close` event. */
   protected _onclose: ((this: WebSocket, ev: CloseEvent) => any) | null = null;
@@ -173,26 +170,15 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   protected _onmessage: ((this: WebSocket, ev: MessageEvent<any>) => any) | null = null;
   /** Attribute-style listener for the `open` event. */
   protected _onopen: ((this: WebSocket, ev: Event) => any) | null = null;
-
-  /** Current reconnection attempt number. */
-  protected _retryCount = 0;
-  /** Buffer for messages sent while disconnected. */
-  protected _messageBuffer: WebSocketSendData[] = [];
   /** Map of currently active attribute-style listeners. */
   protected _attributeListeners: Partial<Record<AttributeEventType, EventListener>> = {};
-  /** Controller used to signal permanent termination. */
-  protected _abortController: AbortController = new AbortController();
 
-  /** Resolves the in-flight {@link _awaitSocketLifecycle} promise; `undefined` when idle. */
-  protected _settleLifecycle: ((init: CloseEventInit) => void) | undefined;
-  /** Resolves the in-flight retry delay; `undefined` when not sleeping. */
-  protected _skipDelay: (() => void) | undefined;
-  /** Set while a user-requested reconnect closes the current socket; that close is not counted as a retry. */
-  protected _reconnectRequested = false;
+  /** Controller used to signal permanent termination. */
+  protected readonly _abortController: AbortController = new AbortController();
 
   // --- Public state ----------------------------------------------
 
-  /** Reconnection configuration options. */
+  /** Reconnection configuration options. Read on every attempt, so changes apply live. */
   reconnectOptions: Required<ReconnectingWebSocketOptions>;
 
   /**
@@ -224,15 +210,6 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @throws {TypeError} If no WebSocket implementation is available.
    */
   constructor(url: UrlProvider, protocols?: ProtocolsProvider, options?: ReconnectingWebSocketOptions);
-  /**
-   * Create a new ReconnectingWebSocket.
-   *
-   * @param url URL or factory function for the WebSocket connection.
-   * @param protocolsOrOptions Subprotocol(s), factory function, or options object.
-   * @param maybeOptions Configuration options when protocols are provided as second argument.
-   *
-   * @throws {TypeError} If no WebSocket implementation is available.
-   */
   constructor(
     url: UrlProvider,
     protocolsOrOptions?: ProtocolsProvider | ReconnectingWebSocketOptions,
@@ -247,16 +224,13 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     const protocols = secondArgIsProtocols ? protocolsOrOptions : undefined;
     const options = secondArgIsProtocols ? maybeOptions : protocolsOrOptions;
 
-    if (!globalThis.WebSocket && !options?.WebSocket) {
-      throw new TypeError(
-        "No WebSocket implementation found. Please provide a custom WebSocket constructor in the options.",
-      );
+    if (!globalThis.WebSocket) {
+      throw new TypeError("No WebSocket implementation found.");
     }
 
     this._urlProvider = url;
     this._protocolsProvider = protocols;
     this.reconnectOptions = {
-      WebSocket: options?.WebSocket ?? WebSocket,
       maxRetries: options?.maxRetries ?? Infinity,
       connectionTimeout: options?.connectionTimeout === undefined ? 10_000 : options.connectionTimeout,
       stableTimeout: options?.stableTimeout ?? 3_000,
@@ -267,7 +241,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       shouldReconnect: options?.shouldReconnect ?? (() => true),
     };
 
-    // Background reconnection loop — handles its own errors via _cleanup
+    // Background reconnection loop — handles its own errors via _terminate
     this._runLoop();
   }
 
@@ -275,21 +249,99 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   // Reconnection lifecycle
   // ============================================================
 
+  /** Run the main reconnection loop. */
+  protected async _runLoop(): Promise<void> {
+    try {
+      while (true) {
+        this._skipNextDelay = false;
+
+        let closeInit: CloseEventInit;
+        try {
+          this._socket = await this._createSocket();
+          this._socket.binaryType = this._binaryType;
+          if (this.terminationSignal.aborted) {
+            this._socket.close();
+            break;
+          }
+
+          closeInit = await this._awaitSocketLifecycle();
+        } catch (error) {
+          // Failure to even create the socket (e.g. a URL factory error) counts as a failed attempt
+          if (this.terminationSignal.aborted) break;
+          this.dispatchEvent(new Event("error"));
+          closeInit = { code: 1006, reason: String(error), wasClean: false };
+        }
+
+        const reconnectRequested = this._reconnectRequested;
+        this._reconnectRequested = false;
+
+        // HACK (nktkas/rews#7):
+        // Dispatch a freshly constructed event on `this`, never the socket's own —
+        // React Native's strict EventTarget throws on a foreign event.
+        const closeEvent = new CloseEvent_("close", closeInit);
+
+        if (!reconnectRequested && !this.terminationSignal.aborted) {
+          if (!this.reconnectOptions.shouldReconnect(closeEvent, this._retryCount)) {
+            this._terminate("RECONNECTION_DECLINED");
+          } else if (this._retryCount >= this.reconnectOptions.maxRetries) {
+            this._terminate("RECONNECTION_LIMIT");
+          }
+        }
+        this.dispatchEvent(closeEvent);
+        if (this.terminationSignal.aborted) return;
+
+        if (!reconnectRequested) {
+          const retryCount = this._retryCount++;
+
+          if (!this._skipNextDelay) {
+            const delay = typeof this.reconnectOptions.reconnectionDelay === "number"
+              ? this.reconnectOptions.reconnectionDelay
+              : this.reconnectOptions.reconnectionDelay(retryCount);
+            await this._delay(delay);
+            if (this.terminationSignal.aborted) break;
+          }
+        }
+      }
+    } catch (error) {
+      this._terminate("UNKNOWN_ERROR", error);
+    }
+
+    // Paths that exit the loop without a close event (terminated before the socket
+    // opened, during the retry sleep, or by a policy callback throwing) synthesize
+    // the final one. On the throwing path the socket's real close code/reason is lost.
+    this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
+  }
+
   /**
    * Create a new WebSocket instance using the current URL and protocols providers.
    *
    * @return Configured WebSocket instance.
    */
   protected async _createSocket(): Promise<WebSocket> {
-    const url = typeof this._urlProvider === "function" ? await this._urlProvider() : this._urlProvider;
-    const protocols = typeof this._protocolsProvider === "function"
-      ? await this._protocolsProvider()
-      : this._protocolsProvider;
+    // A hung user factory must not outlive termination — race it against the signal
+    const raceCtrl = new AbortController();
+    const aborted = new Promise<never>((_, reject) => {
+      this.terminationSignal.addEventListener("abort", () => reject(this.terminationSignal.reason), {
+        once: true,
+        signal: raceCtrl.signal,
+      });
+    });
 
-    const socket = new this.reconnectOptions.WebSocket(url, protocols);
-    this._armConnectionTimeout(socket);
+    try {
+      const url = typeof this._urlProvider === "function"
+        ? await Promise.race([this._urlProvider(), aborted])
+        : this._urlProvider;
+      const protocols = typeof this._protocolsProvider === "function"
+        ? await Promise.race([this._protocolsProvider(), aborted])
+        : this._protocolsProvider;
 
-    return socket;
+      const socket = new WebSocket(url, protocols);
+      this._armConnectionTimeout(socket);
+
+      return socket;
+    } finally {
+      raceCtrl.abort();
+    }
   }
 
   /**
@@ -320,72 +372,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     }
   }
 
-  /** Run the main reconnection loop. */
-  protected async _runLoop(): Promise<void> {
-    try {
-      while (true) {
-        let closeInit: CloseEventInit;
-        try {
-          this._socket = await this._createSocket();
-          this._socket.binaryType = this._binaryType;
-          if (this.terminationSignal.aborted) {
-            this._socket.close();
-            break;
-          }
-
-          closeInit = await this._awaitSocketLifecycle();
-        } catch (error) {
-          // Failure to even create the socket (e.g. a URL factory error) counts as a failed attempt
-          if (this.terminationSignal.aborted) break;
-          this.dispatchEvent(new Event("error"));
-          closeInit = { code: 1006, reason: String(error), wasClean: false };
-        }
-
-        const reconnectRequested = this._reconnectRequested;
-        this._reconnectRequested = false;
-
-        // HACK (nktkas/rews#7):
-        // Dispatch a freshly constructed event on `this`, never the socket's own —
-        // React Native's strict EventTarget throws on a foreign event.
-        const closeEvent = new CloseEvent_("close", closeInit);
-
-        if (!reconnectRequested && !this.terminationSignal.aborted) {
-          if (!this.reconnectOptions.shouldReconnect(closeEvent, this._retryCount)) {
-            this._cleanup("RECONNECTION_DECLINED");
-          } else if (this._retryCount >= this.reconnectOptions.maxRetries) {
-            this._cleanup("RECONNECTION_LIMIT");
-          }
-        }
-        this.dispatchEvent(closeEvent);
-        if (this.terminationSignal.aborted) return;
-
-        if (!reconnectRequested) {
-          const retryCount = this._retryCount;
-          this._retryCount++;
-
-          const delay = typeof this.reconnectOptions.reconnectionDelay === "number"
-            ? this.reconnectOptions.reconnectionDelay
-            : this.reconnectOptions.reconnectionDelay(retryCount);
-          await new Promise<void>((resolve) => {
-            this._skipDelay = resolve;
-            sleep(delay, this.terminationSignal).then(resolve);
-          });
-          this._skipDelay = undefined;
-          if (this.terminationSignal.aborted) break;
-        }
-      }
-    } catch (error) {
-      this._cleanup("UNKNOWN_ERROR", error);
-    }
-
-    // Paths that exit the loop without a close event (terminated before the socket
-    // opened, during the retry sleep, or by a provider error) synthesize the final one.
-    this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
-  }
-
   /** Await the full lifecycle of the current socket until it closes. */
   protected _awaitSocketLifecycle(): Promise<CloseEventInit> {
     return new Promise<CloseEventInit>((resolve) => {
+      const socket = this._socket!;
       const ac = new AbortController();
       const { signal } = ac;
 
@@ -397,19 +387,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       };
       this._settleLifecycle = settle;
 
-      this._socket!.addEventListener("open", () => {
-        // Flush buffered messages — remove only successfully sent on partial failure
-        let sentCount = 0;
-        try {
-          for (; sentCount < this._messageBuffer.length; sentCount++) {
-            this._socket!.send(this._messageBuffer[sentCount]!);
-          }
-          this._messageBuffer = [];
-        } catch {
-          this._messageBuffer.splice(0, sentCount);
-          this._socket!.close();
-          return;
-        }
+      socket.addEventListener("open", () => {
+        if (!this._flushBuffer(socket)) return;
 
         const stableTimer = setTimeout(() => this._retryCount = 0, this.reconnectOptions.stableTimeout);
         signal.addEventListener("abort", () => clearTimeout(stableTimer), { once: true });
@@ -417,34 +396,73 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         this.dispatchEvent(new Event("open"));
       }, { signal });
 
-      this._socket!.addEventListener("message", (event) => {
+      socket.addEventListener("message", (event) => {
         this.dispatchEvent(new MessageEvent_("message", { data: event.data, origin: event.origin }));
       }, { signal });
 
-      this._socket!.addEventListener("error", () => {
+      socket.addEventListener("error", () => {
         this.dispatchEvent(new Event("error"));
 
         // HACK (nodejs/undici#3546):
         // Node.js <24 skips close on connection failure — settle directly.
-        if (this._socket!.readyState === ReconnectingWebSocket.CONNECTING) {
+        if (socket.readyState === ReconnectingWebSocket.CONNECTING) {
           settle({ code: 1006, reason: "", wasClean: false });
         }
       }, { signal });
 
-      this._socket!.addEventListener("close", (event) => {
+      socket.addEventListener("close", (event) => {
         // Some runtimes report code 0 (reserved by RFC 6455) when the connection fails
         settle({ code: event.code || 1006, reason: event.reason, wasClean: event.wasClean });
       }, { signal });
     });
   }
 
-  /**
-   * Permanently terminate the instance and clean up resources.
-   *
-   * @param code Error code indicating the type of termination.
-   * @param cause Underlying error that triggered cleanup.
-   */
-  protected _cleanup(code: ReconnectingWebSocketErrorCode, cause?: unknown): void {
+  /** Flush buffered messages; on partial failure keeps the unsent tail and drops the socket. */
+  protected _flushBuffer(socket: WebSocket): boolean {
+    let sentCount = 0;
+    try {
+      for (; sentCount < this._messageBuffer.length; sentCount++) {
+        socket.send(this._messageBuffer[sentCount]!);
+      }
+      this._messageBuffer = [];
+      return true;
+    } catch {
+      this._messageBuffer.splice(0, sentCount);
+      socket.close();
+      return false;
+    }
+  }
+
+  /** Wait between retries; cut short by reconnect() and termination. */
+  protected _delay(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        if (this._skipDelay === done) this._skipDelay = undefined;
+        clearTimeout(timer);
+        this.terminationSignal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this._skipDelay = done;
+      this.terminationSignal.addEventListener("abort", done, { once: true });
+    });
+  }
+
+  /** Close the current socket and settle its lifecycle if it was still connecting. */
+  protected _dropSocket(code?: number, reason?: string): void {
+    const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
+    this._socket?.close(code, reason);
+
+    // HACK:
+    // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
+    // Settle directly; on compliant runtimes the native close settles first and this is a no-op.
+    if (wasConnecting) {
+      this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
+    }
+  }
+
+  /** Permanently terminate the instance and clean up resources. */
+  protected _terminate(code: ReconnectingWebSocketErrorCode, cause?: unknown): void {
     if (this.terminationSignal.aborted) return;
 
     this._abortController.abort(new ReconnectingWebSocketError(code, cause));
@@ -458,11 +476,13 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
   // --- Properties ------------------------------------------------
 
+  /** The current socket's URL; before the first connection — the static URL, or `""` for a factory. */
   get url(): string {
     if (this._socket) return this._socket.url;
     return typeof this._urlProvider === "function" ? "" : String(this._urlProvider);
   }
 
+  /** `CLOSED` only after permanent termination; any reconnection phase reports `CONNECTING`. */
   get readyState(): number {
     if (this.terminationSignal.aborted) return ReconnectingWebSocket.CLOSED;
     return this._socket?.readyState === ReconnectingWebSocket.OPEN
@@ -470,6 +490,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       : ReconnectingWebSocket.CONNECTING;
   }
 
+  /** Bytes queued on the current socket; messages buffered while disconnected are not counted. */
   get bufferedAmount(): number {
     return this._socket?.bufferedAmount ?? 0;
   }
@@ -516,11 +537,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   get onclose(): ((this: WebSocket, ev: CloseEvent) => any) | null {
     return this._onclose;
   }
-  /**
-   * Set the attribute-style handler for `close` events.
-   *
-   * @param handler Event handler function, or `null` to remove.
-   */
+  /** Set the attribute-style handler for `close` events. */
   set onclose(handler: ((this: WebSocket, ev: CloseEvent) => any) | null) {
     this._onclose = handler;
     this._setAttributeListener("close", handler);
@@ -530,11 +547,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   get onerror(): ((this: WebSocket, ev: Event) => any) | null {
     return this._onerror;
   }
-  /**
-   * Set the attribute-style handler for `error` events.
-   *
-   * @param handler Event handler function, or `null` to remove.
-   */
+  /** Set the attribute-style handler for `error` events. */
   set onerror(handler: ((this: WebSocket, ev: Event) => any) | null) {
     this._onerror = handler;
     this._setAttributeListener("error", handler);
@@ -544,11 +557,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   get onmessage(): ((this: WebSocket, ev: MessageEvent<any>) => any) | null {
     return this._onmessage;
   }
-  /**
-   * Set the attribute-style handler for `message` events.
-   *
-   * @param handler Event handler function, or `null` to remove.
-   */
+  /** Set the attribute-style handler for `message` events. */
   set onmessage(handler: ((this: WebSocket, ev: MessageEvent<any>) => any) | null) {
     this._onmessage = handler;
     this._setAttributeListener("message", handler);
@@ -558,22 +567,13 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   get onopen(): ((this: WebSocket, ev: Event) => any) | null {
     return this._onopen;
   }
-  /**
-   * Set the attribute-style handler for `open` events.
-   *
-   * @param handler Event handler function, or `null` to remove.
-   */
+  /** Set the attribute-style handler for `open` events. */
   set onopen(handler: ((this: WebSocket, ev: Event) => any) | null) {
     this._onopen = handler;
     this._setAttributeListener("open", handler);
   }
 
-  /**
-   * Attach or detach the dispatcher for an attribute-style event handler.
-   *
-   * @param type Event type to manage.
-   * @param handler Current handler, or `null` to detach.
-   */
+  /** Attach or detach the dispatcher for an attribute-style event handler. */
   protected _setAttributeListener(type: AttributeEventType, handler: object | null): void {
     const active = this._attributeListeners[type];
 
@@ -601,25 +601,16 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   close(code?: number, reason?: string): void {
     validateCloseArgs(code, reason);
-
-    const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
-
-    this._socket?.close(code, reason);
-    this._cleanup("TERMINATED_BY_USER");
-
-    // HACK:
-    // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
-    // Settle directly; on compliant runtimes the native close settles first and this is a no-op.
-    if (wasConnecting) {
-      this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
-    }
+    this._dropSocket(code, reason);
+    this._terminate("TERMINATED_BY_USER");
   }
 
   /**
    * Drop the current connection and reconnect immediately.
    *
    * Closes the current socket without counting it towards `maxRetries`, or skips
-   * the current retry delay. Does nothing once permanently terminated.
+   * the current/upcoming retry delay. Cannot interrupt an in-flight url/protocols
+   * factory. Does nothing once permanently terminated.
    *
    * @param code Status code for closing the current socket.
    * @param reason Human-readable reason for the closure.
@@ -635,34 +626,27 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       return;
     }
 
-    const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
-
-    if (this._socket && this._socket.readyState !== ReconnectingWebSocket.CLOSED) {
+    if (this._settleLifecycle && this._socket && this._socket.readyState !== ReconnectingWebSocket.CLOSED) {
       this._reconnectRequested = true;
-      this._socket.close(code, reason);
+      this._dropSocket(code, reason);
+      return;
     }
 
-    // HACK:
-    // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
-    // Settle directly; on compliant runtimes the native close settles first and this is a no-op.
-    if (wasConnecting) {
-      this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
-    }
+    // Settled but not yet sleeping: skip the upcoming delay
+    this._skipNextDelay = true;
   }
 
   /**
    * Send data to the server.
    *
-   * If the connection is not open,
-   * the data is buffered and sent when the connection is established.
-   *
-   * @param data Data payload to send.
+   * If the connection is not open, the data is buffered and sent once it is established.
+   * After permanent termination, data is silently discarded.
    */
   send(data: WebSocketSendData): void {
-    if (this._socket?.readyState !== ReconnectingWebSocket.OPEN && !this.terminationSignal.aborted) {
+    if (this._socket?.readyState === ReconnectingWebSocket.OPEN) {
+      this._socket.send(data);
+    } else if (!this.terminationSignal.aborted) {
       this._messageBuffer.push(data);
-    } else {
-      this._socket?.send(data);
     }
   }
 }
@@ -711,12 +695,7 @@ const MessageEvent_ = globalThis.MessageEvent || class MessageEvent<T> extends E
 // Utilities
 // ============================================================
 
-/**
- * Validate close code and reason per the WHATWG WebSocket specification.
- *
- * @param code Status code to validate.
- * @param reason Reason string to validate.
- */
+/** Validate close code and reason per the WHATWG WebSocket specification. */
 function validateCloseArgs(code?: number, reason?: string): void {
   if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) {
     throw new DOMException_(
@@ -727,27 +706,4 @@ function validateCloseArgs(code?: number, reason?: string): void {
   if (reason !== undefined && new TextEncoder().encode(reason).length > 123) {
     throw new DOMException_("The close reason must not be greater than 123 UTF-8 bytes.", "SyntaxError");
   }
-}
-
-/**
- * Wait for a specified duration. Resolves early when the signal aborts.
- *
- * @param ms Duration in milliseconds.
- * @param signal Abort signal that cuts the wait short.
- */
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) return resolve();
-
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }

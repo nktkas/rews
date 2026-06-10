@@ -7,10 +7,6 @@
  * - Deno: deno test -A mod.test.ts
  * - Node.js: node --test mod.test.ts
  * - Bun: bun test --timeout 30000 mod.test.ts
- *
- * With custom WebSocket library:
- * - WS_LIB=ws node --test mod.test.ts
- * - WS_LIB=undici WS_EXPORT=WebSocket node --test mod.test.ts
  */
 
 import { deepStrictEqual, ok, strictEqual, throws } from "node:assert/strict";
@@ -18,18 +14,6 @@ import { Buffer } from "node:buffer";
 import process from "node:process";
 import { describe, it } from "node:test";
 import { ReconnectingWebSocket, ReconnectingWebSocketError } from "./mod.ts";
-
-// ============================================================
-// WebSocket constructor (native or library via WS_LIB / WS_EXPORT env)
-// ============================================================
-
-const WS: typeof WebSocket = process.env.WS_LIB
-  ? await (async () => {
-    const mod = await import(process.env.WS_LIB!);
-    const key = process.env.WS_EXPORT;
-    return key ? (mod[key] ?? mod.default[key]) : mod.default;
-  })()
-  : (globalThis as any).WebSocket;
 
 // ============================================================
 // Test infrastructure
@@ -52,6 +36,17 @@ function terminated(rws: ReconnectingWebSocket): Promise<ReconnectingWebSocketEr
     if (signal.aborted) return resolve(signal.reason);
     signal.addEventListener("abort", () => resolve(signal.reason), { once: true });
   });
+}
+
+/** Replaces `globalThis.WebSocket` for the duration of the callback. */
+async function withWebSocket(mock: unknown, fn: () => Promise<void>): Promise<void> {
+  const original = globalThis.WebSocket;
+  globalThis.WebSocket = mock as typeof WebSocket;
+  try {
+    await fn();
+  } finally {
+    globalThis.WebSocket = original;
+  }
 }
 
 /** Returns a port with nothing listening on it. */
@@ -210,9 +205,12 @@ async function createNodeEchoServer(): Promise<EchoServer> {
           }
         }
 
-        // 0x8 = Close frame
+        // 0x8 = Close frame: echo the status code back per RFC 6455 §5.5.1
         if (opcode === 0x8) {
-          socket.write(Buffer.from([0x88, 0x00]));
+          const ack = payload.length >= 2
+            ? Buffer.concat([Buffer.from([0x88, 2]), payload.subarray(0, 2)])
+            : Buffer.from([0x88, 0x00]);
+          socket.write(ack);
           socket.end();
           return;
         }
@@ -300,7 +298,7 @@ describe("ReconnectingWebSocket", () => {
 
   describe("Constructor", () => {
     it("on* handlers default to null and round-trip correctly", () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       for (const prop of ["onopen", "onclose", "onerror", "onmessage"] as const) {
         strictEqual(rws[prop], null, `${prop} should default to null`);
@@ -312,18 +310,6 @@ describe("ReconnectingWebSocket", () => {
         rws[prop] = null;
         strictEqual(rws[prop], null, `${prop} should be null after reset`);
       }
-
-      rws.close();
-    });
-
-    it("uses custom WebSocket implementation", async () => {
-      class CustomWebSocket extends WS {}
-      const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: CustomWebSocket,
-      }) as ReconnectingWebSocketWithInternals;
-
-      await once(rws, "open");
-      ok(rws._socket instanceof CustomWebSocket);
 
       rws.close();
     });
@@ -347,19 +333,19 @@ describe("ReconnectingWebSocket", () => {
 
   describe("Before first connection", () => {
     it("url returns the configured URL", () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
       strictEqual(rws.url, WS_URL);
       rws.close();
     });
 
     it("url is empty string when the URL is a function", () => {
-      const rws = new ReconnectingWebSocket(() => WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(() => WS_URL);
       strictEqual(rws.url, "");
       rws.close();
     });
 
     it("readyState is CONNECTING", () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
       strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
       rws.close();
     });
@@ -370,7 +356,6 @@ describe("ReconnectingWebSocket", () => {
   describe("readyState", () => {
     it("follows the lifecycle: CONNECTING → OPEN → CONNECTING on reconnect → CLOSED on close()", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 60_000,
       });
@@ -397,7 +382,7 @@ describe("ReconnectingWebSocket", () => {
         const rws = new ReconnectingWebSocket(() => {
           callCount++;
           return WS_URL;
-        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
+        }, { maxRetries: 2, reconnectionDelay: 0 });
 
         strictEqual(callCount, 1);
 
@@ -415,7 +400,7 @@ describe("ReconnectingWebSocket", () => {
         const rws = new ReconnectingWebSocket(async () => {
           callCount++;
           return await Promise.resolve(WS_URL);
-        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
+        }, { maxRetries: 2, reconnectionDelay: 0 });
 
         await once(rws, "open");
         strictEqual(callCount, 1);
@@ -434,7 +419,7 @@ describe("ReconnectingWebSocket", () => {
           calls++;
           await Promise.resolve();
           throw new Error("token expired");
-        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
+        }, { maxRetries: 2, reconnectionDelay: 0 });
 
         const closeReasons: string[] = [];
         rws.addEventListener("close", (e) => closeReasons.push((e as CloseEvent).reason));
@@ -451,7 +436,7 @@ describe("ReconnectingWebSocket", () => {
         const rws = new ReconnectingWebSocket(() => {
           if (++calls < 3) throw new Error("transient");
           return WS_URL;
-        }, { WebSocket: WS, reconnectionDelay: 0 });
+        }, { reconnectionDelay: 0 });
 
         await once(rws, "open");
 
@@ -463,7 +448,7 @@ describe("ReconnectingWebSocket", () => {
 
     describe("protocols", () => {
       it("retains chosen protocol across reconnect", async () => {
-        const rws = new ReconnectingWebSocket(WS_URL, "superchat", { WebSocket: WS });
+        const rws = new ReconnectingWebSocket(WS_URL, "superchat");
 
         await once(rws, "open");
         strictEqual(rws.protocol, "superchat");
@@ -484,7 +469,7 @@ describe("ReconnectingWebSocket", () => {
             callCount++;
             return "superchat";
           },
-          { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 },
+          { maxRetries: 2, reconnectionDelay: 0 },
         );
 
         strictEqual(callCount, 1);
@@ -509,7 +494,7 @@ describe("ReconnectingWebSocket", () => {
             callCount++;
             return await Promise.resolve("superchat");
           },
-          { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 },
+          { maxRetries: 2, reconnectionDelay: 0 },
         );
 
         await once(rws, "open");
@@ -531,7 +516,7 @@ describe("ReconnectingWebSocket", () => {
           calls++;
           await Promise.resolve();
           throw new Error("protocols unavailable");
-        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
+        }, { maxRetries: 2, reconnectionDelay: 0 });
 
         const reason = await terminated(rws);
 
@@ -542,7 +527,7 @@ describe("ReconnectingWebSocket", () => {
 
     describe("binaryType", () => {
       it("applies binaryType set right after the constructor to the first connection", async () => {
-        const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+        const rws = new ReconnectingWebSocket(WS_URL);
         rws.binaryType = "arraybuffer";
 
         await once(rws, "open");
@@ -559,7 +544,6 @@ describe("ReconnectingWebSocket", () => {
 
       it("preserves binaryType across reconnection", async () => {
         const rws = new ReconnectingWebSocket(WS_URL, {
-          WebSocket: WS,
           maxRetries: 1,
           reconnectionDelay: 0,
         });
@@ -580,7 +564,6 @@ describe("ReconnectingWebSocket", () => {
       it("default maxRetries keeps reconnecting indefinitely", async () => {
         const port = await getClosedPort();
         const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-          WebSocket: WS,
           reconnectionDelay: 0,
         });
 
@@ -597,7 +580,6 @@ describe("ReconnectingWebSocket", () => {
 
       it("respects maxRetries limit", async () => {
         const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-          WebSocket: WS,
           maxRetries: 2,
           reconnectionDelay: 0,
         });
@@ -615,12 +597,11 @@ describe("ReconnectingWebSocket", () => {
 
     describe("connectionTimeout", () => {
       it("disabled when set to null", async () => {
-        const probe = new ReconnectingWebSocket(HANGING_URL, { WebSocket: WS });
+        const probe = new ReconnectingWebSocket(HANGING_URL);
         const defaultTimeout = probe.reconnectOptions.connectionTimeout!;
         probe.close();
 
         const rws = new ReconnectingWebSocket(HANGING_URL, {
-          WebSocket: WS,
           connectionTimeout: null,
         });
 
@@ -633,7 +614,6 @@ describe("ReconnectingWebSocket", () => {
 
       it("fires if not opened in time", async () => {
         const rws = new ReconnectingWebSocket(HANGING_URL, {
-          WebSocket: WS,
           maxRetries: 0,
           connectionTimeout: 100,
         });
@@ -658,17 +638,18 @@ describe("ReconnectingWebSocket", () => {
           }
         }
 
-        const rws = new ReconnectingWebSocket(WS_URL, {
-          WebSocket: OpenWithoutEventWebSocket as any,
-          connectionTimeout: 50,
-          maxRetries: 0,
+        await withWebSocket(OpenWithoutEventWebSocket, async () => {
+          const rws = new ReconnectingWebSocket(WS_URL, {
+            connectionTimeout: 50,
+            maxRetries: 0,
+          });
+
+          await new Promise((r) => setTimeout(r, 150));
+
+          strictEqual(closeCalls, 0);
+
+          rws.close();
         });
-
-        await new Promise((r) => setTimeout(r, 150));
-
-        strictEqual(closeCalls, 0);
-
-        rws.close();
       });
     });
 
@@ -694,15 +675,16 @@ describe("ReconnectingWebSocket", () => {
           }
         }
 
-        const rws = new ReconnectingWebSocket(WS_URL, {
-          WebSocket: InstantCloseWebSocket as any,
-          maxRetries: 2,
-          reconnectionDelay: 0,
+        await withWebSocket(InstantCloseWebSocket, async () => {
+          const rws = new ReconnectingWebSocket(WS_URL, {
+            maxRetries: 2,
+            reconnectionDelay: 0,
+          });
+
+          const reason = await terminated(rws);
+
+          strictEqual(reason.code, "RECONNECTION_LIMIT");
         });
-
-        const reason = await terminated(rws);
-
-        strictEqual(reason.code, "RECONNECTION_LIMIT");
       });
 
       it("resets the retry counter after a stable connection", async () => {
@@ -726,22 +708,23 @@ describe("ReconnectingWebSocket", () => {
           }
         }
 
-        const rws = new ReconnectingWebSocket(WS_URL, {
-          WebSocket: DroppingWebSocket as any,
-          maxRetries: 1,
-          reconnectionDelay: 0,
-          stableTimeout: 50,
-        });
-
-        let closes = 0;
-        await new Promise<void>((resolve) => {
-          rws.addEventListener("close", () => {
-            if (++closes === 3) resolve();
+        await withWebSocket(DroppingWebSocket, async () => {
+          const rws = new ReconnectingWebSocket(WS_URL, {
+            maxRetries: 1,
+            reconnectionDelay: 0,
+            stableTimeout: 50,
           });
-        });
 
-        ok(!rws.terminationSignal.aborted);
-        rws.close();
+          let closes = 0;
+          await new Promise<void>((resolve) => {
+            rws.addEventListener("close", () => {
+              if (++closes === 3) resolve();
+            });
+          });
+
+          ok(!rws.terminationSignal.aborted);
+          rws.close();
+        });
       });
     });
 
@@ -750,7 +733,6 @@ describe("ReconnectingWebSocket", () => {
         const port = await getClosedPort();
         const seen: [number, number][] = [];
         const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-          WebSocket: WS,
           shouldReconnect: (event, attempt) => {
             seen.push([event.code, attempt]);
             return false;
@@ -766,7 +748,6 @@ describe("ReconnectingWebSocket", () => {
       it("is not consulted for user-initiated closures", async () => {
         let calls = 0;
         const rws = new ReconnectingWebSocket(WS_URL, {
-          WebSocket: WS,
           shouldReconnect: () => {
             calls++;
             return true;
@@ -785,7 +766,7 @@ describe("ReconnectingWebSocket", () => {
 
     describe("reconnectionDelay", () => {
       it("default delay applies equal jitter within [delay/2, delay]", () => {
-        const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+        const rws = new ReconnectingWebSocket(WS_URL);
         const delayFn = rws.reconnectOptions.reconnectionDelay as (attempt: number) => number;
 
         for (const [attempt, base] of [[0, 150], [3, 1200], [10, 10_000]] as const) {
@@ -801,7 +782,6 @@ describe("ReconnectingWebSocket", () => {
       it("custom delay (number)", async () => {
         const customDelay = 500;
         const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-          WebSocket: WS,
           maxRetries: 2,
           reconnectionDelay: customDelay,
         });
@@ -820,7 +800,6 @@ describe("ReconnectingWebSocket", () => {
       it("custom delay (function)", async () => {
         const delays = [200, 500];
         const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-          WebSocket: WS,
           maxRetries: delays.length,
           reconnectionDelay: (attempt) => delays[attempt] ?? delays[delays.length - 1]!,
         });
@@ -840,7 +819,6 @@ describe("ReconnectingWebSocket", () => {
       it("errors thrown by reconnectionDelay terminate the instance", async () => {
         const delayError = new Error("boom");
         const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-          WebSocket: WS,
           maxRetries: 1,
           reconnectionDelay: () => {
             throw delayError;
@@ -861,7 +839,6 @@ describe("ReconnectingWebSocket", () => {
   describe("send()", () => {
     it("buffers messages when not open and replays on reconnect", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       }) as ReconnectingWebSocketWithInternals;
@@ -894,7 +871,6 @@ describe("ReconnectingWebSocket", () => {
     it("reports code 1006 when the connection fails", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-        WebSocket: WS,
         maxRetries: 0,
       });
 
@@ -905,7 +881,6 @@ describe("ReconnectingWebSocket", () => {
     it("aborts terminationSignal before the final close on reconnection limit", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       });
@@ -922,7 +897,6 @@ describe("ReconnectingWebSocket", () => {
     it("dispatches a final close when close() is called during the retry sleep", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-        WebSocket: WS,
         maxRetries: 5,
         reconnectionDelay: 60_000,
       });
@@ -940,7 +914,6 @@ describe("ReconnectingWebSocket", () => {
     it("dispatches a final close when a policy error terminates the instance", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-        WebSocket: WS,
         reconnectionDelay: () => {
           throw new Error("boom");
         },
@@ -955,8 +928,21 @@ describe("ReconnectingWebSocket", () => {
       deepStrictEqual(abortedInClose, [false, true]);
     });
 
+    it("dispatches a final close when close() is called during a hung URL factory", async () => {
+      const rws = new ReconnectingWebSocket(() => new Promise<string>(() => {}));
+
+      const finalClose = new Promise<boolean>((resolve) => {
+        rws.addEventListener("close", () => resolve(rws.terminationSignal.aborted), { once: true });
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      rws.close();
+
+      ok(await finalClose);
+    });
+
     it("final close on user close() reports the user code", async () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
       await once(rws, "open");
 
       let abortedInClose: boolean | undefined;
@@ -975,7 +961,6 @@ describe("ReconnectingWebSocket", () => {
   describe("close()", () => {
     it("prevents reconnection", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 0,
       });
@@ -996,7 +981,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("close() with invalid arguments throws without side effects", async () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       throws(() => rws.close(1), (e: Error) => e.name === "InvalidAccessError");
       throws(() => rws.close(1000, "x".repeat(124)), (e: Error) => e.name === "SyntaxError");
@@ -1009,7 +994,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("double close() keeps the original termination reason", () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       rws.close();
       const reason = rws.terminationSignal.reason;
@@ -1019,7 +1004,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("is CLOSED (not CLOSING) after close() during CONNECTING", () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
       rws.close();
@@ -1027,7 +1012,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("dispatches close event when called before socket is assigned", async () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       let closeCount = 0;
       rws.addEventListener("close", () => closeCount++);
@@ -1047,7 +1032,6 @@ describe("ReconnectingWebSocket", () => {
   describe("reconnect()", () => {
     it("does not stop reconnection", async () => {
       const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 0,
       });
@@ -1061,7 +1045,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("reconnects instead of terminating at maxRetries: 0", async () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS, maxRetries: 0 });
+      const rws = new ReconnectingWebSocket(WS_URL, { maxRetries: 0 });
       await once(rws, "open");
 
       const reopened = once(rws, "open");
@@ -1072,10 +1056,28 @@ describe("ReconnectingWebSocket", () => {
       rws.close();
     });
 
+    it("skips the upcoming retry delay when called from a close listener", async () => {
+      const port = await getClosedPort();
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        maxRetries: 2,
+        reconnectionDelay: 60_000,
+      });
+
+      let closes = 0;
+      await new Promise<void>((resolve) => {
+        rws.addEventListener("close", () => {
+          if (++closes === 1) rws.reconnect();
+          else resolve();
+        });
+      });
+
+      ok(!rws.terminationSignal.aborted);
+      rws.close();
+    });
+
     it("skips the current retry delay", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
-        WebSocket: WS,
         maxRetries: 5,
         reconnectionDelay: 60_000,
       });
@@ -1096,7 +1098,6 @@ describe("ReconnectingWebSocket", () => {
   describe("Event listeners", () => {
     it("addEventListener persists after reconnection", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       });
@@ -1117,7 +1118,6 @@ describe("ReconnectingWebSocket", () => {
 
     it("{ once: true } fires only once across reconnections", async () => {
       const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-        WebSocket: WS,
         maxRetries: 3,
         reconnectionDelay: 0,
       });
@@ -1131,7 +1131,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("reassigning an on* handler keeps its position among listeners", async () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       const calls: string[] = [];
       rws.onopen = () => calls.push("attr-old");
@@ -1146,7 +1146,6 @@ describe("ReconnectingWebSocket", () => {
 
     it("on* handler fires after reconnection", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 0,
       });
@@ -1171,7 +1170,6 @@ describe("ReconnectingWebSocket", () => {
   describe("Termination", () => {
     it("aborts terminationSignal when maxRetries exceeded", async () => {
       const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
-        WebSocket: WS,
         maxRetries: 0,
         reconnectionDelay: 0,
       });
@@ -1183,7 +1181,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("aborts terminationSignal synchronously on close()", () => {
-      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      const rws = new ReconnectingWebSocket(WS_URL);
 
       rws.close();
 
@@ -1195,7 +1193,6 @@ describe("ReconnectingWebSocket", () => {
 
     it("temporary close does not terminate", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
-        WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 100,
       });
