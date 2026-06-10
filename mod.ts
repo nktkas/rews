@@ -390,12 +390,11 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       this._settleLifecycle = settle;
 
       socket.addEventListener("open", () => {
-        if (!this._flushBuffer(socket)) return;
-
         const stableTimer = setTimeout(() => this._retryCount = 0, this.reconnectOptions.stableTimeout);
         signal.addEventListener("abort", () => clearTimeout(stableTimer), { once: true });
 
         this.dispatchEvent(new Event("open"));
+        this._flushBuffer(socket);
       }, { signal });
 
       socket.addEventListener("message", (event) => {
@@ -420,18 +419,18 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   }
 
   /** Flush buffered messages; on partial failure keeps the unsent tail and drops the socket. */
-  protected _flushBuffer(socket: WebSocket): boolean {
+  protected _flushBuffer(socket: WebSocket): void {
+    if (socket.readyState !== ReconnectingWebSocket.OPEN) return; // an open listener may have closed or reconnected
+
     let sentCount = 0;
     try {
       for (; sentCount < this._messageBuffer.length; sentCount++) {
         socket.send(this._messageBuffer[sentCount]!);
       }
       this._messageBuffer = [];
-      return true;
     } catch {
       this._messageBuffer.splice(0, sentCount);
       socket.close();
-      return false;
     }
   }
 

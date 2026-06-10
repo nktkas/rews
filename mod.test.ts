@@ -864,6 +864,21 @@ describe("ReconnectingWebSocket", () => {
       rws.close();
     });
 
+    it("flushes the offline buffer after the open event", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL);
+      rws.send("buffered");
+
+      const received: string[] = [];
+      rws.addEventListener("message", (e) => received.push(e.data));
+      rws.addEventListener("open", () => rws.send("from-open-listener"), { once: true });
+
+      await once(rws, "open");
+      await new Promise((r) => setTimeout(r, 500));
+
+      deepStrictEqual(received, ["from-open-listener", "buffered"]);
+      rws.close();
+    });
+
     it("bufferedAmount counts messages buffered while disconnected", async () => {
       const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
