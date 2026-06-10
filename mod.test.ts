@@ -365,6 +365,29 @@ describe("ReconnectingWebSocket", () => {
     });
   });
 
+  // --- readyState ------------------------------------------------
+
+  describe("readyState", () => {
+    it("follows the lifecycle: CONNECTING → OPEN → CONNECTING on reconnect → CLOSED on close()", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL, {
+        WebSocket: WS,
+        maxRetries: 3,
+        reconnectionDelay: 60_000,
+      });
+      strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
+
+      await once(rws, "open");
+      strictEqual(rws.readyState, ReconnectingWebSocket.OPEN);
+
+      rws.close(undefined, undefined, false);
+      await once(rws, "close");
+      strictEqual(rws.readyState, ReconnectingWebSocket.CONNECTING);
+
+      rws.close();
+      strictEqual(rws.readyState, ReconnectingWebSocket.CLOSED);
+    });
+  });
+
   // --- Reconnection ------------------------------------------------------------
 
   describe("Reconnection", () => {
