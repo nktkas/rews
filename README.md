@@ -160,9 +160,10 @@ ws.addEventListener("close", () => console.log("disconnected")); // fires on eac
 ws.addEventListener("open", () => init(), { once: true });
 ```
 
-### Terminate Event
+### Termination
 
-Fires when the connection is permanently closed:
+`terminationSignal` is an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) that aborts when
+the connection is permanently closed. The abort reason is always a `ReconnectingWebSocketError`:
 
 | Code                 | Description                                |
 | -------------------- | ------------------------------------------ |
@@ -171,15 +172,17 @@ Fires when the connection is permanently closed:
 | `UNKNOWN_ERROR`      | Unhandled error in user-provided functions |
 
 ```ts
-ws.addEventListener("terminate", (e) => {
-  e.detail.code; // ReconnectingWebSocketErrorCode
-  e.detail.cause; // original error, if any
-});
+ws.terminationSignal.aborted; // boolean
+ws.terminationSignal.reason; // ReconnectingWebSocketError, once aborted
 
-ws.isTerminated; // boolean
-ws.terminationReason; // ReconnectingWebSocketError | undefined
-ws.terminationSignal; // AbortSignal
+ws.terminationSignal.addEventListener("abort", () => {
+  ws.terminationSignal.reason.code; // ReconnectingWebSocketErrorCode
+  ws.terminationSignal.reason.cause; // original error, if any
+});
 ```
+
+Being a standard `AbortSignal`, it composes with `AbortSignal.any()`, `fetch()`, `addEventListener(..., { signal })`,
+and other platform APIs.
 
 ### Closing Behavior
 

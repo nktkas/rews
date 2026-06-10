@@ -45,6 +45,15 @@ function once(target: EventTarget, type: string): Promise<Event> {
   return new Promise((r) => target.addEventListener(type, r, { once: true }));
 }
 
+/** Wait until the instance is permanently terminated. */
+function terminated(rws: ReconnectingWebSocket): Promise<ReconnectingWebSocketError> {
+  return new Promise((resolve) => {
+    const signal = rws.terminationSignal;
+    if (signal.aborted) return resolve(signal.reason);
+    signal.addEventListener("abort", () => resolve(signal.reason), { once: true });
+  });
+}
+
 // ============================================================
 // Echo server
 // ============================================================
@@ -392,12 +401,11 @@ describe("ReconnectingWebSocket", () => {
           throw urlError;
         }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
 
-        await once(rws, "terminate");
+        const reason = await terminated(rws);
 
-        ok(rws.isTerminated);
-        ok(rws.terminationReason instanceof ReconnectingWebSocketError);
-        strictEqual(rws.terminationReason.code, "UNKNOWN_ERROR");
-        strictEqual(rws.terminationReason.cause, urlError);
+        ok(reason instanceof ReconnectingWebSocketError);
+        strictEqual(reason.code, "UNKNOWN_ERROR");
+        strictEqual(reason.cause, urlError);
       });
     });
 
@@ -472,12 +480,11 @@ describe("ReconnectingWebSocket", () => {
           throw protocolsError;
         }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
 
-        await once(rws, "terminate");
+        const reason = await terminated(rws);
 
-        ok(rws.isTerminated);
-        ok(rws.terminationReason instanceof ReconnectingWebSocketError);
-        strictEqual(rws.terminationReason.code, "UNKNOWN_ERROR");
-        strictEqual(rws.terminationReason.cause, protocolsError);
+        ok(reason instanceof ReconnectingWebSocketError);
+        strictEqual(reason.code, "UNKNOWN_ERROR");
+        strictEqual(reason.cause, protocolsError);
       });
     });
 
@@ -528,9 +535,9 @@ describe("ReconnectingWebSocket", () => {
         let closeCount = 0;
         rws.addEventListener("close", () => closeCount++);
 
-        await once(rws, "terminate");
+        await terminated(rws);
 
-        ok(rws.isTerminated);
+        ok(rws.terminationSignal.aborted);
         // 1 initial + 2 retries = 3 close events
         strictEqual(closeCount, 3);
       });
@@ -561,9 +568,9 @@ describe("ReconnectingWebSocket", () => {
           connectionTimeout: 100,
         });
 
-        await once(rws, "terminate");
+        await terminated(rws);
 
-        ok(rws.isTerminated);
+        ok(rws.terminationSignal.aborted);
       });
 
       it("does not close an already-open socket when the timer fires", async () => {
@@ -607,7 +614,7 @@ describe("ReconnectingWebSocket", () => {
         const closeTimes: number[] = [];
         rws.addEventListener("close", () => closeTimes.push(performance.now()));
 
-        await once(rws, "terminate");
+        await terminated(rws);
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
@@ -626,7 +633,7 @@ describe("ReconnectingWebSocket", () => {
         const closeTimes: number[] = [];
         rws.addEventListener("close", () => closeTimes.push(performance.now()));
 
-        await once(rws, "terminate");
+        await terminated(rws);
 
         for (let i = 1; i < closeTimes.length; i++) {
           const diff = closeTimes[i]! - closeTimes[i - 1]!;
@@ -645,12 +652,11 @@ describe("ReconnectingWebSocket", () => {
           },
         });
 
-        await once(rws, "terminate");
+        const reason = await terminated(rws);
 
-        ok(rws.isTerminated);
-        ok(rws.terminationReason instanceof ReconnectingWebSocketError);
-        strictEqual(rws.terminationReason.code, "UNKNOWN_ERROR");
-        strictEqual(rws.terminationReason.cause, delayError);
+        ok(reason instanceof ReconnectingWebSocketError);
+        strictEqual(reason.code, "UNKNOWN_ERROR");
+        strictEqual(reason.cause, delayError);
       });
     });
   });
@@ -731,7 +737,7 @@ describe("ReconnectingWebSocket", () => {
       await new Promise((r) => setTimeout(r, 200));
 
       strictEqual(openCount, 1, "no reconnection should happen after permanent close");
-      ok(rws.isTerminated);
+      ok(rws.terminationSignal.aborted);
     });
 
     it("close(permanently=false) does not stop reconnection", async () => {
@@ -743,24 +749,20 @@ describe("ReconnectingWebSocket", () => {
 
       rws.close(undefined, undefined, false);
 
-      await once(rws, "terminate");
+      const reason = await terminated(rws);
 
-      ok(rws.isTerminated);
-      ok(rws.terminationReason instanceof ReconnectingWebSocketError);
-      strictEqual(rws.terminationReason.code, "RECONNECTION_LIMIT");
+      ok(reason instanceof ReconnectingWebSocketError);
+      strictEqual(reason.code, "RECONNECTION_LIMIT");
     });
 
-    it("double close() dispatches terminate event only once", () => {
+    it("double close() keeps the original termination reason", () => {
       const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
 
-      let terminateCount = 0;
-      rws.addEventListener("terminate", () => terminateCount++);
-
       rws.close();
+      const reason = rws.terminationSignal.reason;
       rws.close(); // second call must be a no-op
 
-      strictEqual(terminateCount, 1);
-      ok(rws.isTerminated);
+      strictEqual(rws.terminationSignal.reason, reason);
     });
 
     it("is CLOSED (not CLOSING) after close() during CONNECTING", () => {
@@ -783,7 +785,7 @@ describe("ReconnectingWebSocket", () => {
       await new Promise((r) => setTimeout(r, 500));
 
       strictEqual(closeCount, 1, "close event should be dispatched exactly once");
-      ok(rws.isTerminated);
+      ok(rws.terminationSignal.aborted);
     });
   });
 
@@ -821,7 +823,7 @@ describe("ReconnectingWebSocket", () => {
       let closeOnceCalls = 0;
       rws.addEventListener("close", () => closeOnceCalls++, { once: true });
 
-      await once(rws, "terminate");
+      await terminated(rws);
 
       strictEqual(closeOnceCalls, 1);
     });
@@ -865,52 +867,42 @@ describe("ReconnectingWebSocket", () => {
   // --- Termination ------------------------------------------------------------
 
   describe("Termination", () => {
-    it("dispatches terminate event when maxRetries exceeded", async () => {
+    it("aborts terminationSignal when maxRetries exceeded", async () => {
       const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
         WebSocket: WS,
         maxRetries: 0,
         reconnectionDelay: 0,
       });
 
-      const event = await once(rws, "terminate") as CustomEvent<ReconnectingWebSocketError>;
+      const reason = await terminated(rws);
 
-      strictEqual(event.type, "terminate");
-      ok(event.detail instanceof ReconnectingWebSocketError);
-      strictEqual(event.detail.code, "RECONNECTION_LIMIT");
-      ok(rws.isTerminated);
+      ok(reason instanceof ReconnectingWebSocketError);
+      strictEqual(reason.code, "RECONNECTION_LIMIT");
     });
 
-    it("dispatches terminate event on close()", () => {
+    it("aborts terminationSignal synchronously on close()", () => {
       const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
-
-      let terminateEvent: CustomEvent<ReconnectingWebSocketError> | undefined;
-      rws.addEventListener("terminate", (e) => terminateEvent = e);
 
       rws.close();
 
-      ok(terminateEvent);
-      strictEqual(terminateEvent!.type, "terminate");
-      ok(terminateEvent!.detail instanceof ReconnectingWebSocketError);
-      strictEqual(terminateEvent!.detail.code, "TERMINATED_BY_USER");
-      ok(rws.isTerminated);
+      ok(rws.terminationSignal.aborted);
+      const reason = rws.terminationSignal.reason;
+      ok(reason instanceof ReconnectingWebSocketError);
+      strictEqual(reason.code, "TERMINATED_BY_USER");
     });
 
-    it("no terminate event on temporary close", async () => {
+    it("temporary close does not terminate", async () => {
       const rws = new ReconnectingWebSocket(WS_URL, {
         WebSocket: WS,
         maxRetries: 1,
         reconnectionDelay: 100,
       });
 
-      let terminateCalled = false;
-      rws.addEventListener("terminate", () => terminateCalled = true);
-
       await once(rws, "open");
       rws.close(undefined, undefined, false);
       await once(rws, "open");
 
-      strictEqual(terminateCalled, false);
-      ok(!rws.isTerminated);
+      ok(!rws.terminationSignal.aborted);
 
       rws.close();
     });

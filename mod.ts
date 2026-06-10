@@ -69,12 +69,6 @@ export interface ReconnectingWebSocketOptions {
   reconnectionDelay?: MaybeFn<number, [attempt: number]>;
 }
 
-/** Event map for {@link ReconnectingWebSocket} including the custom `terminate` event. */
-interface ReconnectingWebSocketEventMap extends WebSocketEventMap {
-  /** Event fired when the instance is permanently terminated. */
-  terminate: CustomEvent<ReconnectingWebSocketError>;
-}
-
 /** Event types supported by attribute-style event handlers (`onopen`, `onclose`, etc.). */
 type AttributeEventType = "open" | "close" | "error" | "message";
 
@@ -114,11 +108,11 @@ export interface ReconnectingWebSocket {
    * @param listener Callback function or object with `handleEvent` method.
    * @param options Listener options or `useCapture` boolean.
    */
-  addEventListener<K extends keyof ReconnectingWebSocketEventMap>(
+  addEventListener<K extends keyof WebSocketEventMap>(
     type: K,
     listener:
-      | ((ev: ReconnectingWebSocketEventMap[K]) => any)
-      | { handleEvent: (event: ReconnectingWebSocketEventMap[K]) => any }
+      | ((ev: WebSocketEventMap[K]) => any)
+      | { handleEvent: (event: WebSocketEventMap[K]) => any }
       | null,
     options?: boolean | AddEventListenerOptions,
   ): void;
@@ -130,11 +124,11 @@ export interface ReconnectingWebSocket {
    * @param listener The listener to remove.
    * @param options Listener options or `useCapture` boolean.
    */
-  removeEventListener<K extends keyof ReconnectingWebSocketEventMap>(
+  removeEventListener<K extends keyof WebSocketEventMap>(
     type: K,
     listener:
-      | ((ev: ReconnectingWebSocketEventMap[K]) => any)
-      | { handleEvent: (event: ReconnectingWebSocketEventMap[K]) => any }
+      | ((ev: WebSocketEventMap[K]) => any)
+      | { handleEvent: (event: WebSocketEventMap[K]) => any }
       | null,
     options?: boolean | EventListenerOptions,
   ): void;
@@ -181,16 +175,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /** Reconnection configuration options. */
   reconnectOptions: Required<ReconnectingWebSocketOptions>;
 
-  /** Whether the instance has been permanently terminated. */
-  get isTerminated(): boolean {
-    return this._abortController.signal.aborted;
-  }
-  /** Termination reason, or `undefined` if not yet terminated. */
-  get terminationReason(): ReconnectingWebSocketError | undefined {
-    return this._abortController.signal.reason;
-  }
-
-  /** AbortSignal that is aborted when the instance is permanently terminated. */
+  /**
+   * AbortSignal that is aborted when the instance is permanently terminated.
+   * The abort reason is always a {@link ReconnectingWebSocketError}.
+   */
   get terminationSignal(): AbortSignal {
     return this._abortController.signal;
   }
@@ -313,14 +301,14 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       while (true) {
         this._socket = await this._createSocket();
         this._socket.binaryType = this._binaryType;
-        if (this.isTerminated) {
+        if (this.terminationSignal.aborted) {
           this._socket.close();
           this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
           break;
         }
 
         await this._awaitSocketLifecycle();
-        if (this.isTerminated) break;
+        if (this.terminationSignal.aborted) break;
 
         const retryCount = this._retryCount;
         if (retryCount >= this.reconnectOptions.maxRetries) {
@@ -333,7 +321,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
           ? this.reconnectOptions.reconnectionDelay
           : this.reconnectOptions.reconnectionDelay(retryCount);
         await sleep(delay, this._abortController.signal);
-        if (this.isTerminated) break;
+        if (this.terminationSignal.aborted) break;
       }
     } catch (error) {
       this._cleanup("UNKNOWN_ERROR", error);
@@ -405,15 +393,11 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @param cause Underlying error that triggered cleanup.
    */
   protected _cleanup(code: ReconnectingWebSocketErrorCode, cause?: unknown): void {
-    if (this.isTerminated) return;
+    if (this.terminationSignal.aborted) return;
 
-    const error = new ReconnectingWebSocketError(code, cause);
-
-    this._abortController.abort(error);
+    this._abortController.abort(new ReconnectingWebSocketError(code, cause));
     this._socket?.close();
     this._messageBuffer = [];
-
-    this.dispatchEvent(new CustomEvent_("terminate", { detail: error }));
   }
 
   // ============================================================
@@ -428,7 +412,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   }
 
   get readyState(): number {
-    if (this.isTerminated) return ReconnectingWebSocket.CLOSED;
+    if (this.terminationSignal.aborted) return ReconnectingWebSocket.CLOSED;
     return this._socket?.readyState ?? ReconnectingWebSocket.CONNECTING;
   }
 
@@ -585,7 +569,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    * @param data Data payload to send.
    */
   send(data: WebSocketSendData): void {
-    if (this._socket?.readyState !== ReconnectingWebSocket.OPEN && !this.isTerminated) {
+    if (this._socket?.readyState !== ReconnectingWebSocket.OPEN && !this.terminationSignal.aborted) {
       this._messageBuffer.push(data);
     } else {
       this._socket?.send(data);
@@ -624,15 +608,6 @@ const MessageEvent_ = globalThis.MessageEvent || class MessageEvent<T> extends E
     this.ports = eventInitDict?.ports ?? [];
   }
   initMessageEvent() {}
-};
-
-const CustomEvent_ = globalThis.CustomEvent || class CustomEvent<T> extends Event {
-  readonly detail: T | null;
-  constructor(type: string, eventInitDict?: CustomEventInit<T>) {
-    super(type, eventInitDict);
-    this.detail = eventInitDict?.detail ?? null;
-  }
-  initCustomEvent() {}
 };
 
 // ============================================================
