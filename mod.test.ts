@@ -54,6 +54,17 @@ function terminated(rws: ReconnectingWebSocket): Promise<ReconnectingWebSocketEr
   });
 }
 
+/** Returns a port with nothing listening on it. */
+async function getClosedPort(): Promise<number> {
+  const net = await import("node:net");
+  const probe = net.createServer();
+  const port = await new Promise<number>((resolve) => {
+    probe.listen(0, () => resolve((probe.address() as { port: number }).port));
+  });
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+
 // ============================================================
 // Echo server
 // ============================================================
@@ -697,14 +708,7 @@ describe("ReconnectingWebSocket", () => {
 
   describe("close event", () => {
     it("reports code 1006 when the connection fails", async () => {
-      // A freshly released port: connection refused
-      const net = await import("node:net");
-      const probe = net.createServer();
-      const port = await new Promise<number>((resolve) => {
-        probe.listen(0, () => resolve((probe.address() as { port: number }).port));
-      });
-      await new Promise((resolve) => probe.close(resolve));
-
+      const port = await getClosedPort();
       const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
         WebSocket: WS,
         maxRetries: 0,
@@ -712,6 +716,70 @@ describe("ReconnectingWebSocket", () => {
 
       const event = await once(rws, "close") as CloseEvent;
       strictEqual(event.code, 1006);
+    });
+
+    it("aborts terminationSignal before the final close on reconnection limit", async () => {
+      const port = await getClosedPort();
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        WebSocket: WS,
+        maxRetries: 1,
+        reconnectionDelay: 0,
+      });
+
+      const abortedInClose: boolean[] = [];
+      rws.addEventListener("close", () => abortedInClose.push(rws.terminationSignal.aborted));
+
+      await terminated(rws);
+      await new Promise((r) => setTimeout(r, 100));
+
+      deepStrictEqual(abortedInClose, [false, true]);
+    });
+
+    it("dispatches a final close when close() is called during the retry sleep", async () => {
+      const port = await getClosedPort();
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        WebSocket: WS,
+        maxRetries: 5,
+        reconnectionDelay: 60_000,
+      });
+
+      await once(rws, "close"); // first attempt failed; the loop is sleeping
+      const finalClose = new Promise<boolean>((resolve) => {
+        rws.addEventListener("close", () => resolve(rws.terminationSignal.aborted), { once: true });
+      });
+
+      rws.close();
+
+      ok(await finalClose);
+    });
+
+    it("dispatches a final close when a provider error terminates the instance", async () => {
+      const rws = new ReconnectingWebSocket(async () => {
+        await Promise.resolve();
+        throw new Error("token expired");
+      }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
+
+      const abortedInClose: boolean[] = [];
+      rws.addEventListener("close", () => abortedInClose.push(rws.terminationSignal.aborted));
+
+      await terminated(rws);
+      await new Promise((r) => setTimeout(r, 100));
+
+      deepStrictEqual(abortedInClose, [true]);
+    });
+
+    it("final close on user close() reports the user code", async () => {
+      const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+      await once(rws, "open");
+
+      let abortedInClose: boolean | undefined;
+      rws.addEventListener("close", () => abortedInClose = rws.terminationSignal.aborted, { once: true });
+
+      rws.close(4001, "bye");
+      const event = await once(rws, "close") as CloseEvent;
+
+      strictEqual(event.code, 4001);
+      strictEqual(abortedInClose, true);
     });
   });
 

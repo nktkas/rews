@@ -303,46 +303,49 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         this._socket.binaryType = this._binaryType;
         if (this.terminationSignal.aborted) {
           this._socket.close();
-          this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
           break;
         }
 
-        await this._awaitSocketLifecycle();
-        if (this.terminationSignal.aborted) break;
+        const closeInit = await this._awaitSocketLifecycle();
+
+        if (!this.terminationSignal.aborted && this._retryCount >= this.reconnectOptions.maxRetries) {
+          this._cleanup("RECONNECTION_LIMIT");
+        }
+        // HACK (nktkas/rews#7):
+        // Dispatch a freshly constructed event on `this`, never the socket's own —
+        // React Native's strict EventTarget throws on a foreign event.
+        this.dispatchEvent(new CloseEvent_("close", closeInit));
+        if (this.terminationSignal.aborted) return;
 
         const retryCount = this._retryCount;
-        if (retryCount >= this.reconnectOptions.maxRetries) {
-          this._cleanup("RECONNECTION_LIMIT");
-          break;
-        }
         this._retryCount++;
 
         const delay = typeof this.reconnectOptions.reconnectionDelay === "number"
           ? this.reconnectOptions.reconnectionDelay
           : this.reconnectOptions.reconnectionDelay(retryCount);
-        await sleep(delay, this._abortController.signal);
+        await sleep(delay, this.terminationSignal);
         if (this.terminationSignal.aborted) break;
       }
     } catch (error) {
       this._cleanup("UNKNOWN_ERROR", error);
     }
+
+    // Paths that exit the loop without a close event (terminated before the socket
+    // opened, during the retry sleep, or by a provider error) synthesize the final one.
+    this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
   }
 
   /** Await the full lifecycle of the current socket until it closes. */
-  protected _awaitSocketLifecycle(): Promise<void> {
-    return new Promise<void>((resolve) => {
+  protected _awaitSocketLifecycle(): Promise<CloseEventInit> {
+    return new Promise<CloseEventInit>((resolve) => {
       const ac = new AbortController();
       const { signal } = ac;
 
-      // HACK (nktkas/rews#7):
-      // Ends the lifecycle via the wrapper (`this`), never the socket — avoids RN's
-      // strict EventTarget throwing on a foreign event. Idempotent via the abort signal guard.
       const settle = (init: CloseEventInit): void => {
         if (signal.aborted) return; // already settled
         this._settleLifecycle = undefined;
         ac.abort();
-        this.dispatchEvent(new CloseEvent_("close", init));
-        resolve();
+        resolve(init);
       };
       this._settleLifecycle = settle;
 
@@ -615,18 +618,18 @@ const MessageEvent_ = globalThis.MessageEvent || class MessageEvent<T> extends E
 // ============================================================
 
 /**
- * Wait for a specified duration.
+ * Wait for a specified duration. Resolves early when the signal aborts.
  *
  * @param ms Duration in milliseconds.
- * @param signal Abort signal to cancel the wait.
+ * @param signal Abort signal that cuts the wait short.
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(signal.reason);
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
 
     const onAbort = () => {
       clearTimeout(timer);
-      reject(signal?.reason);
+      resolve();
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
