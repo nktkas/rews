@@ -319,12 +319,14 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
    */
   protected async _createSocket(): Promise<WebSocket> {
     // A hung user factory must not outlive termination — race it against the signal
-    const raceCtrl = new AbortController();
+    let onAbort!: () => void;
     const aborted = new Promise<never>((_, reject) => {
-      this.terminationSignal.addEventListener("abort", () => reject(this.terminationSignal.reason), {
-        once: true,
-        signal: raceCtrl.signal,
-      });
+      onAbort = () => reject(this.terminationSignal.reason);
+
+      // HACK:
+      // React Native's AbortController polyfill ignores the { signal } listener option,
+      // so the listener is removed manually instead.
+      this.terminationSignal.addEventListener("abort", onAbort, { once: true });
     });
 
     try {
@@ -340,7 +342,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
       return socket;
     } finally {
-      raceCtrl.abort();
+      this.terminationSignal.removeEventListener("abort", onAbort);
     }
   }
 
