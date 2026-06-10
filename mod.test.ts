@@ -428,18 +428,36 @@ describe("ReconnectingWebSocket", () => {
         rws.close();
       });
 
-      it("errors thrown by async URL factory terminate the instance", async () => {
-        const urlError = new Error("token expired");
+      it("errors thrown by the async URL factory count as failed attempts", async () => {
+        let calls = 0;
         const rws = new ReconnectingWebSocket(async () => {
+          calls++;
           await Promise.resolve();
-          throw urlError;
-        }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
+          throw new Error("token expired");
+        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
+
+        const closeReasons: string[] = [];
+        rws.addEventListener("close", (e) => closeReasons.push((e as CloseEvent).reason));
 
         const reason = await terminated(rws);
 
-        ok(reason instanceof ReconnectingWebSocketError);
-        strictEqual(reason.code, "UNKNOWN_ERROR");
-        strictEqual(reason.cause, urlError);
+        strictEqual(reason.code, "RECONNECTION_LIMIT");
+        strictEqual(calls, 3); // 1 initial + 2 retries
+        ok(closeReasons.every((r) => r.includes("token expired")));
+      });
+
+      it("recovers once the URL factory recovers", async () => {
+        let calls = 0;
+        const rws = new ReconnectingWebSocket(() => {
+          if (++calls < 3) throw new Error("transient");
+          return WS_URL;
+        }, { WebSocket: WS, reconnectionDelay: 0 });
+
+        await once(rws, "open");
+
+        strictEqual(calls, 3);
+        ok(!rws.terminationSignal.aborted);
+        rws.close();
       });
     });
 
@@ -507,18 +525,18 @@ describe("ReconnectingWebSocket", () => {
         rws.close();
       });
 
-      it("errors thrown by async protocols factory terminate the instance", async () => {
-        const protocolsError = new Error("protocols unavailable");
+      it("errors thrown by the async protocols factory count as failed attempts", async () => {
+        let calls = 0;
         const rws = new ReconnectingWebSocket(WS_URL, async () => {
+          calls++;
           await Promise.resolve();
-          throw protocolsError;
-        }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
+          throw new Error("protocols unavailable");
+        }, { WebSocket: WS, maxRetries: 2, reconnectionDelay: 0 });
 
         const reason = await terminated(rws);
 
-        ok(reason instanceof ReconnectingWebSocketError);
-        strictEqual(reason.code, "UNKNOWN_ERROR");
-        strictEqual(reason.cause, protocolsError);
+        strictEqual(reason.code, "RECONNECTION_LIMIT");
+        strictEqual(calls, 3); // 1 initial + 2 retries
       });
     });
 
@@ -919,11 +937,14 @@ describe("ReconnectingWebSocket", () => {
       ok(await finalClose);
     });
 
-    it("dispatches a final close when a provider error terminates the instance", async () => {
-      const rws = new ReconnectingWebSocket(async () => {
-        await Promise.resolve();
-        throw new Error("token expired");
-      }, { WebSocket: WS, maxRetries: 1, reconnectionDelay: 0 });
+    it("dispatches a final close when a policy error terminates the instance", async () => {
+      const port = await getClosedPort();
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        WebSocket: WS,
+        reconnectionDelay: () => {
+          throw new Error("boom");
+        },
+      });
 
       const abortedInClose: boolean[] = [];
       rws.addEventListener("close", () => abortedInClose.push(rws.terminationSignal.aborted));
@@ -931,7 +952,7 @@ describe("ReconnectingWebSocket", () => {
       await terminated(rws);
       await new Promise((r) => setTimeout(r, 100));
 
-      deepStrictEqual(abortedInClose, [true]);
+      deepStrictEqual(abortedInClose, [false, true]);
     });
 
     it("final close on user close() reports the user code", async () => {

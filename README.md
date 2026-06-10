@@ -151,6 +151,8 @@ const ws = new ReconnectingWebSocket(
 );
 ```
 
+Errors thrown by these functions count as failed connection attempts and follow the normal retry flow.
+
 ### Event Lifecycle
 
 Standard `open`, `close`, `error`, and `message` events fire on **every** connection cycle — not just the first one. A
@@ -169,12 +171,12 @@ ws.addEventListener("open", () => init(), { once: true });
 `terminationSignal` is an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) that aborts when
 the connection is permanently closed. The abort reason is always a `ReconnectingWebSocketError`:
 
-| Code                    | Description                                |
-| ----------------------- | ------------------------------------------ |
-| `RECONNECTION_LIMIT`    | Max retries exceeded                       |
-| `RECONNECTION_DECLINED` | `shouldReconnect` returned `false`         |
-| `TERMINATED_BY_USER`    | `close()` called                           |
-| `UNKNOWN_ERROR`         | Unhandled error in user-provided functions |
+| Code                    | Description                                              |
+| ----------------------- | -------------------------------------------------------- |
+| `RECONNECTION_LIMIT`    | Max retries exceeded                                     |
+| `RECONNECTION_DECLINED` | `shouldReconnect` returned `false`                       |
+| `TERMINATED_BY_USER`    | `close()` called                                         |
+| `UNKNOWN_ERROR`         | Unhandled error in `reconnectionDelay`/`shouldReconnect` |
 
 ```ts
 ws.terminationSignal.aborted; // boolean

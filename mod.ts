@@ -98,7 +98,7 @@ export class ReconnectingWebSocketError extends Error {
    * - `RECONNECTION_LIMIT`: Maximum reconnection attempts reached.
    * - `RECONNECTION_DECLINED`: `shouldReconnect` returned `false`.
    * - `TERMINATED_BY_USER`: Closed via `close()` method.
-   * - `UNKNOWN_ERROR`: Unhandled error in user-provided functions.
+   * - `UNKNOWN_ERROR`: Unhandled error outside a connection attempt (e.g. in `reconnectionDelay` or `shouldReconnect`).
    */
   readonly code: ReconnectingWebSocketErrorCode;
   /**
@@ -324,14 +324,22 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   protected async _runLoop(): Promise<void> {
     try {
       while (true) {
-        this._socket = await this._createSocket();
-        this._socket.binaryType = this._binaryType;
-        if (this.terminationSignal.aborted) {
-          this._socket.close();
-          break;
-        }
+        let closeInit: CloseEventInit;
+        try {
+          this._socket = await this._createSocket();
+          this._socket.binaryType = this._binaryType;
+          if (this.terminationSignal.aborted) {
+            this._socket.close();
+            break;
+          }
 
-        const closeInit = await this._awaitSocketLifecycle();
+          closeInit = await this._awaitSocketLifecycle();
+        } catch (error) {
+          // Failure to even create the socket (e.g. a URL factory error) counts as a failed attempt
+          if (this.terminationSignal.aborted) break;
+          this.dispatchEvent(new Event("error"));
+          closeInit = { code: 1006, reason: String(error), wasClean: false };
+        }
 
         const reconnectRequested = this._reconnectRequested;
         this._reconnectRequested = false;
