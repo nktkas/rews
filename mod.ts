@@ -492,9 +492,15 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       : ReconnectingWebSocket.CONNECTING;
   }
 
-  /** Bytes queued on the current socket; messages buffered while disconnected are not counted. */
+  /** Bytes queued on the current socket plus messages buffered while disconnected. */
   get bufferedAmount(): number {
-    return this._socket?.bufferedAmount ?? 0;
+    let total = this._socket?.bufferedAmount ?? 0;
+    for (const data of this._messageBuffer) {
+      if (typeof data === "string") total += new TextEncoder().encode(data).length;
+      else if (data instanceof Blob) total += data.size;
+      else total += data.byteLength;
+    }
+    return total;
   }
 
   get extensions(): string {

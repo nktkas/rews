@@ -863,6 +863,23 @@ describe("ReconnectingWebSocket", () => {
 
       rws.close();
     });
+
+    it("bufferedAmount counts messages buffered while disconnected", async () => {
+      const port = await getClosedPort();
+      const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+        reconnectionDelay: 5000,
+      });
+
+      rws.send("héllo"); // 6 UTF-8 bytes
+      rws.send(new Uint8Array([1, 2, 3]));
+      rws.send(new Uint8Array([4, 5]).buffer);
+      rws.send(new Blob(["ab"]));
+
+      strictEqual(rws.bufferedAmount, 13);
+
+      rws.close();
+      strictEqual(rws.bufferedAmount, 0);
+    });
   });
 
   // --- close event ------------------------------------------------------------
