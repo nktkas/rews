@@ -484,7 +484,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   }
 
   /** `CLOSED` only after permanent termination; any reconnection phase reports `CONNECTING`. */
-  get readyState(): number {
+  get readyState(): 0 | 1 | 2 | 3 {
     if (this.terminationSignal.aborted) return ReconnectingWebSocket.CLOSED;
     return this._socket?.readyState === ReconnectingWebSocket.OPEN
       ? ReconnectingWebSocket.OPEN
