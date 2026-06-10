@@ -119,6 +119,15 @@ if (!globalThis.EventTarget) globalThis.EventTarget = EventTarget;
 if (!globalThis.Event) globalThis.Event = Event;
 ```
 
+React Native ships an `AbortController` polyfill that drops the `abort()` reason, leaving `terminationSignal.reason`
+undefined — replace it with one that keeps it:
+
+```js
+import { AbortController, AbortSignal } from "abortcontroller-polyfill/dist/cjs-ponyfill";
+globalThis.AbortController = AbortController;
+globalThis.AbortSignal = AbortSignal;
+```
+
 ## Options
 
 ```ts
