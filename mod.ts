@@ -53,8 +53,10 @@ export interface ReconnectingWebSocketOptions {
    */
   WebSocket?: new (url: string | URL, protocols?: string | string[]) => WebSocket;
   /**
-   * Maximum number of reconnection attempts.
-   * @default `3`
+   * Maximum number of consecutive failed reconnection attempts.
+   *
+   * The counter resets after a connection stays open for {@link stableTimeout}.
+   * @default `Infinity`
    */
   maxRetries?: number;
   /**
@@ -69,7 +71,7 @@ export interface ReconnectingWebSocketOptions {
   stableTimeout?: number;
   /**
    * Delay before reconnection in ms, or a function of attempt number.
-   * @default `(n) => Math.min(2 ** n * 150, 10_000)` - Exponential backoff with max 10s.
+   * @default Exponential backoff `2 ** n * 150` capped at 10s, with equal jitter.
    */
   reconnectionDelay?: MaybeFn<number, [attempt: number]>;
 }
@@ -246,10 +248,13 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     this._protocolsProvider = protocols;
     this.reconnectOptions = {
       WebSocket: options?.WebSocket ?? WebSocket,
-      maxRetries: options?.maxRetries ?? 3,
+      maxRetries: options?.maxRetries ?? Infinity,
       connectionTimeout: options?.connectionTimeout === undefined ? 10_000 : options.connectionTimeout,
       stableTimeout: options?.stableTimeout ?? 3_000,
-      reconnectionDelay: options?.reconnectionDelay ?? ((n) => Math.min(2 ** n * 150, 10_000)),
+      reconnectionDelay: options?.reconnectionDelay ?? ((n) => {
+        const delay = Math.min(2 ** n * 150, 10_000);
+        return delay / 2 + Math.random() * (delay / 2);
+      }),
     };
 
     // Background reconnection loop — handles its own errors via _cleanup

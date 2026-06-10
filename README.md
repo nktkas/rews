@@ -125,13 +125,13 @@ if (!globalThis.Event) globalThis.Event = Event;
 interface ReconnectingWebSocketOptions {
   /** Custom WebSocket constructor. @default globalThis.WebSocket */
   WebSocket?: typeof WebSocket;
-  /** Maximum number of reconnection attempts. @default 3 */
+  /** Maximum number of consecutive failed reconnection attempts. @default Infinity */
   maxRetries?: number;
   /** Connection timeout in ms (null to disable). @default 10_000 */
   connectionTimeout?: number | null;
   /** Time in ms a connection must stay open before the retry counter resets. @default 3_000 */
   stableTimeout?: number;
-  /** Delay before reconnection in ms, or a function of attempt number. @default exponential backoff, max 10s */
+  /** Delay before reconnection in ms, or a function of attempt number. @default exponential backoff with jitter, max 10s */
   reconnectionDelay?: number | ((attempt: number) => number);
 }
 ```

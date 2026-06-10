@@ -559,6 +559,24 @@ describe("ReconnectingWebSocket", () => {
     });
 
     describe("maxRetries", () => {
+      it("default maxRetries keeps reconnecting indefinitely", async () => {
+        const port = await getClosedPort();
+        const rws = new ReconnectingWebSocket(`ws://127.0.0.1:${port}`, {
+          WebSocket: WS,
+          reconnectionDelay: 0,
+        });
+
+        let closes = 0;
+        await new Promise<void>((resolve) => {
+          rws.addEventListener("close", () => {
+            if (++closes === 6) resolve();
+          });
+        });
+
+        ok(!rws.terminationSignal.aborted);
+        rws.close();
+      });
+
       it("respects maxRetries limit", async () => {
         const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
           WebSocket: WS,
@@ -710,6 +728,20 @@ describe("ReconnectingWebSocket", () => {
     });
 
     describe("reconnectionDelay", () => {
+      it("default delay applies equal jitter within [delay/2, delay]", () => {
+        const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+        const delayFn = rws.reconnectOptions.reconnectionDelay as (attempt: number) => number;
+
+        for (const [attempt, base] of [[0, 150], [3, 1200], [10, 10_000]] as const) {
+          for (let i = 0; i < 20; i++) {
+            const delay = delayFn(attempt);
+            ok(delay >= base / 2 && delay <= base, `attempt ${attempt}: ${delay} outside [${base / 2}, ${base}]`);
+          }
+        }
+
+        rws.close();
+      });
+
       it("custom delay (number)", async () => {
         const customDelay = 500;
         const rws = new ReconnectingWebSocket(INVALID_WS_URL, {
