@@ -1,6 +1,6 @@
 {
   "name": "@nktkas/rews",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "license": "MIT",
   "tasks": {
     "check": "deno fmt --check && deno lint && deno check --doc"
