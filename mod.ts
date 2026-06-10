@@ -257,13 +257,14 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
         let closeInit: CloseEventInit;
         try {
-          this._socket = await this._createSocket();
-          this._socket.binaryType = this._binaryType;
-          if (this.terminationSignal.aborted) {
-            this._socket.close();
-            break;
-          }
+          const [url, protocols] = await this._resolveEndpoint();
+          if (this.terminationSignal.aborted) break;
 
+          // Subscribe in the same synchronous block as the construction: a socket that
+          // fails immediately dispatches its events on the very first microtask
+          this._socket = new WebSocket(url, protocols);
+          this._socket.binaryType = this._binaryType;
+          this._armConnectionTimeout(this._socket);
           closeInit = await this._awaitSocketLifecycle();
         } catch (error) {
           // Failure to even create the socket (e.g. a URL factory error) counts as a failed attempt
@@ -312,12 +313,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));
   }
 
-  /**
-   * Create a new WebSocket instance using the current URL and protocols providers.
-   *
-   * @return Configured WebSocket instance.
-   */
-  protected async _createSocket(): Promise<WebSocket> {
+  /** Resolve the connection URL and protocols from their providers. */
+  protected async _resolveEndpoint(): Promise<[string | URL, string | string[] | undefined]> {
     // A hung user factory must not outlive termination — race it against the signal
     let onAbort!: () => void;
     const aborted = new Promise<never>((_, reject) => {
@@ -337,10 +334,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
         ? await Promise.race([this._protocolsProvider(), aborted])
         : this._protocolsProvider;
 
-      const socket = new WebSocket(url, protocols);
-      this._armConnectionTimeout(socket);
-
-      return socket;
+      return [url, protocols];
     } finally {
       this.terminationSignal.removeEventListener("abort", onAbort);
     }
@@ -379,8 +373,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     const socket = this._socket!;
 
     // HACK:
-    // Node.js fails connections to fetch-blocked ports synchronously, so the close
-    // event has already fired by the time this subscription runs. Settle immediately.
+    // Node.js fails connections to fetch-blocked ports inside the constructor itself —
+    // such a socket is already CLOSED here. Settle immediately instead of waiting.
     if (socket.readyState === ReconnectingWebSocket.CLOSED) {
       return Promise.resolve({ code: 1006, reason: "", wasClean: false });
     }
