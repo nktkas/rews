@@ -289,14 +289,14 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     if (timeout === null) return;
 
     const timer = setTimeout(() => {
-      const wasConnecting = socket.readyState === ReconnectingWebSocket.CONNECTING;
+      if (socket.readyState !== ReconnectingWebSocket.CONNECTING) return;
 
       socket.close();
 
       // HACK:
       // Node.js <24, Bun, and React Native skip the close event during CONNECTING.
       // Settle directly; the identity check guards against a stale timer.
-      if (wasConnecting && this._socket === socket) {
+      if (this._socket === socket) {
         this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
       }
     }, timeout);

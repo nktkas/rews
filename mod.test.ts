@@ -559,6 +559,34 @@ describe("ReconnectingWebSocket", () => {
 
         ok(rws.isTerminated);
       });
+
+      it("does not close an already-open socket when the timer fires", async () => {
+        // Simulates the boundary race: readyState is already OPEN, but the open
+        // event (which clears the timer) has not been dispatched yet.
+        let closeCalls = 0;
+        class OpenWithoutEventWebSocket extends EventTarget {
+          readyState = ReconnectingWebSocket.OPEN;
+          binaryType = "blob";
+          send(): void {}
+          close(): void {
+            closeCalls++;
+            this.readyState = ReconnectingWebSocket.CLOSED;
+            this.dispatchEvent(new Event("close"));
+          }
+        }
+
+        const rws = new ReconnectingWebSocket(WS_URL, {
+          WebSocket: OpenWithoutEventWebSocket as any,
+          connectionTimeout: 50,
+          maxRetries: 0,
+        });
+
+        await new Promise((r) => setTimeout(r, 150));
+
+        strictEqual(closeCalls, 0);
+
+        rws.close();
+      });
     });
 
     describe("reconnectionDelay", () => {
