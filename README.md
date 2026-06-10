@@ -129,6 +129,8 @@ interface ReconnectingWebSocketOptions {
   maxRetries?: number;
   /** Connection timeout in ms (null to disable). @default 10_000 */
   connectionTimeout?: number | null;
+  /** Time in ms a connection must stay open before the retry counter resets. @default 3_000 */
+  stableTimeout?: number;
   /** Delay before reconnection in ms, or a function of attempt number. @default exponential backoff, max 10s */
   reconnectionDelay?: number | ((attempt: number) => number);
 }

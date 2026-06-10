@@ -63,6 +63,11 @@ export interface ReconnectingWebSocketOptions {
    */
   connectionTimeout?: number | null;
   /**
+   * Time in ms a connection must stay open before the retry counter resets.
+   * @default `3_000`
+   */
+  stableTimeout?: number;
+  /**
    * Delay before reconnection in ms, or a function of attempt number.
    * @default `(n) => Math.min(2 ** n * 150, 10_000)` - Exponential backoff with max 10s.
    */
@@ -243,6 +248,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       WebSocket: options?.WebSocket ?? WebSocket,
       maxRetries: options?.maxRetries ?? 3,
       connectionTimeout: options?.connectionTimeout === undefined ? 10_000 : options.connectionTimeout,
+      stableTimeout: options?.stableTimeout ?? 3_000,
       reconnectionDelay: options?.reconnectionDelay ?? ((n) => Math.min(2 ** n * 150, 10_000)),
     };
 
@@ -366,8 +372,6 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       this._settleLifecycle = settle;
 
       this._socket!.addEventListener("open", () => {
-        this._retryCount = 0;
-
         // Flush buffered messages — remove only successfully sent on partial failure
         let sentCount = 0;
         try {
@@ -380,6 +384,9 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
           this._socket!.close();
           return;
         }
+
+        const stableTimer = setTimeout(() => this._retryCount = 0, this.reconnectOptions.stableTimeout);
+        signal.addEventListener("abort", () => clearTimeout(stableTimer), { once: true });
 
         this.dispatchEvent(new Event("open"));
       }, { signal });

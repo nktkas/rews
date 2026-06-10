@@ -636,6 +636,79 @@ describe("ReconnectingWebSocket", () => {
       });
     });
 
+    describe("stableTimeout", () => {
+      it("counts short-lived connections towards maxRetries", async () => {
+        // Opens and immediately closes — like a server that accepts and drops every connection
+        class InstantCloseWebSocket extends EventTarget {
+          readyState = 0;
+          binaryType = "blob";
+          send(): void {}
+          close(): void {
+            this.readyState = 3;
+            this.dispatchEvent(new Event("close"));
+          }
+          constructor() {
+            super();
+            // Open on a macrotask: a real socket cannot open before the caller subscribes
+            setTimeout(() => {
+              this.readyState = 1;
+              this.dispatchEvent(new Event("open"));
+              this.close();
+            }, 0);
+          }
+        }
+
+        const rws = new ReconnectingWebSocket(WS_URL, {
+          WebSocket: InstantCloseWebSocket as any,
+          maxRetries: 2,
+          reconnectionDelay: 0,
+        });
+
+        const reason = await terminated(rws);
+
+        strictEqual(reason.code, "RECONNECTION_LIMIT");
+      });
+
+      it("resets the retry counter after a stable connection", async () => {
+        // Opens, stays alive past stableTimeout, then drops
+        class DroppingWebSocket extends EventTarget {
+          readyState = 0;
+          binaryType = "blob";
+          send(): void {}
+          close(): void {
+            this.readyState = 3;
+            this.dispatchEvent(new Event("close"));
+          }
+          constructor() {
+            super();
+            // Open on a macrotask: a real socket cannot open before the caller subscribes
+            setTimeout(() => {
+              this.readyState = 1;
+              this.dispatchEvent(new Event("open"));
+              setTimeout(() => this.close(), 150);
+            }, 0);
+          }
+        }
+
+        const rws = new ReconnectingWebSocket(WS_URL, {
+          WebSocket: DroppingWebSocket as any,
+          maxRetries: 1,
+          reconnectionDelay: 0,
+          stableTimeout: 50,
+        });
+
+        let closes = 0;
+        await new Promise<void>((resolve) => {
+          rws.addEventListener("close", () => {
+            if (++closes === 3) resolve();
+          });
+        });
+
+        ok(!rws.terminationSignal.aborted);
+        rws.close();
+      });
+    });
+
     describe("reconnectionDelay", () => {
       it("custom delay (number)", async () => {
         const customDelay = 500;
