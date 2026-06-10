@@ -323,9 +323,9 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(this.terminationSignal.reason);
 
-      // HACK:
-      // React Native's AbortController polyfill ignores the { signal } listener option,
-      // so the listener is removed manually instead.
+      // HACK (mysticatea/event-target-shim#32):
+      // React Native's AbortController polyfill (built on event-target-shim v5) ignores
+      // the { signal } listener option, so the listener is removed manually instead.
       this.terminationSignal.addEventListener("abort", onAbort, { once: true });
     });
 
@@ -360,8 +360,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
 
       socket.close();
 
-      // HACK:
-      // Node.js <24, Bun, and React Native skip the close event during CONNECTING.
+      // HACK (nodejs/undici#3546):
+      // Node.js <24 and React Native skip the close event during CONNECTING.
       // Settle directly; the identity check guards against a stale timer.
       if (this._socket === socket) {
         this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
@@ -454,8 +454,8 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     const wasConnecting = this._socket?.readyState === ReconnectingWebSocket.CONNECTING;
     this._socket?.close(code, reason);
 
-    // HACK:
-    // Node.js <24, Bun, and React Native skip the close event when close() is called during CONNECTING.
+    // HACK (nodejs/undici#3546):
+    // Node.js <24 and React Native skip the close event when close() is called during CONNECTING.
     // Settle directly; on compliant runtimes the native close settles first and this is a no-op.
     if (wasConnecting) {
       this._settleLifecycle?.({ code: 1006, reason: "", wasClean: false });
@@ -615,9 +615,10 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
   /**
    * Drop the current connection and reconnect immediately.
    *
-   * Closes the current socket without counting it towards `maxRetries`, or skips
-   * the current/upcoming retry delay. Cannot interrupt an in-flight url/protocols
-   * factory. Does nothing once permanently terminated.
+   * - The closed socket does not count towards `maxRetries`.
+   * - The current or next retry delay is skipped.
+   * - Cannot interrupt an in-flight url/protocols factory.
+   * - Does nothing once permanently terminated.
    *
    * @param code Status code for closing the current socket.
    * @param reason Human-readable reason for the closure.
