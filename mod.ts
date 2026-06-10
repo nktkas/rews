@@ -274,7 +274,6 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
       : this._protocolsProvider;
 
     const socket = new this.reconnectOptions.WebSocket(url, protocols);
-    socket.binaryType = this._binaryType;
     this._armConnectionTimeout(socket);
 
     return socket;
@@ -313,6 +312,7 @@ export class ReconnectingWebSocket extends EventTarget implements WebSocket {
     try {
       while (true) {
         this._socket = await this._createSocket();
+        this._socket.binaryType = this._binaryType;
         if (this.isTerminated) {
           this._socket.close();
           this.dispatchEvent(new CloseEvent_("close", { code: 1006, reason: "", wasClean: false }));

@@ -476,6 +476,22 @@ describe("ReconnectingWebSocket", () => {
     });
 
     describe("binaryType", () => {
+      it("applies binaryType set right after the constructor to the first connection", async () => {
+        const rws = new ReconnectingWebSocket(WS_URL, { WebSocket: WS });
+        rws.binaryType = "arraybuffer";
+
+        await once(rws, "open");
+        rws.send(new Uint8Array([1, 2, 3]));
+        const event = await once(rws, "message") as MessageEvent;
+
+        ok(
+          event.data instanceof ArrayBuffer,
+          `expected ArrayBuffer, got ${event.data?.constructor?.name}`,
+        );
+
+        rws.close();
+      });
+
       it("preserves binaryType across reconnection", async () => {
         const rws = new ReconnectingWebSocket(WS_URL, {
           WebSocket: WS,
